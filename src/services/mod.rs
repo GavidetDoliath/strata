@@ -11,8 +11,9 @@ pub use file_source::{
     LocationValidationError, RequestId,
 };
 pub use operations::{
-    CreateDirectoryRequest, DeleteRequest, OperationEvent, OperationProvider, OperationRequestId,
-    PasteItem, PasteRequest, RenameRequest, RestoreRequest, TransferConflict, validate_basename,
+    CreateDirectoryRequest, CreateFileRequest, DeleteRequest, OperationEvent, OperationProvider,
+    OperationRequestId, PasteItem, PasteRequest, RenameRequest, RestoreRequest, TransferConflict,
+    validate_basename,
 };
 pub use preview::{
     Preview, PreviewContent, PreviewEvent, PreviewProvider, PreviewRequest, PreviewRequestId,
