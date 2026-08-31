@@ -1,9 +1,27 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use super::{BuildKind, Channel, Version};
+use super::{
+    BuildKind, Channel, ReleaseSummary, Version, best_update, is_eligible, rollback_target,
+};
 
 fn parse(tag: &str) -> Version {
     Version::parse(tag).unwrap_or_else(|| panic!("expected {tag} to parse"))
+}
+
+/// Builds a [`ReleaseSummary`] for a final, non-draft release with an
+/// installable asset, so each test only needs to override what it cares
+/// about.
+fn release(tag: &str) -> ReleaseSummary {
+    ReleaseSummary {
+        tag: tag.to_string(),
+        version: parse(tag),
+        draft: false,
+        prerelease: false,
+        download_url: Some(format!("https://example.invalid/{tag}")),
+        published_at: None,
+        commit: None,
+        notes: String::new(),
+    }
 }
 
 #[test]
@@ -129,4 +147,122 @@ fn build_kind_labels_are_ui_facing() {
     assert_eq!(BuildKind::Stable.label(), "Stable");
     assert_eq!(BuildKind::Rc.label(), "Release candidate");
     assert_eq!(BuildKind::Nightly.label(), "Nightly");
+}
+
+#[test]
+fn draft_rejected_on_stable_and_preview() {
+    let draft = ReleaseSummary {
+        draft: true,
+        ..release("v0.5.0")
+    };
+    assert!(!is_eligible(Channel::Stable, &draft));
+    assert!(!is_eligible(Channel::Preview, &draft));
+}
+
+#[test]
+fn assetless_release_rejected_on_both_channels() {
+    let assetless = ReleaseSummary {
+        download_url: None,
+        ..release("v0.5.0")
+    };
+    assert!(!is_eligible(Channel::Stable, &assetless));
+    assert!(!is_eligible(Channel::Preview, &assetless));
+}
+
+#[test]
+fn stable_rejects_prerelease_tag_even_when_flag_is_false() {
+    let mislabelled = ReleaseSummary {
+        prerelease: false,
+        ..release("v0.5.0-rc.1")
+    };
+    assert!(!is_eligible(Channel::Stable, &mislabelled));
+}
+
+#[test]
+fn stable_rejects_prerelease_flag_even_when_tag_parses_as_final() {
+    let mislabelled = ReleaseSummary {
+        prerelease: true,
+        ..release("v0.5.0")
+    };
+    assert!(!is_eligible(Channel::Stable, &mislabelled));
+}
+
+#[test]
+fn preview_accepts_both_final_and_prerelease() {
+    let final_release = release("v0.5.0");
+    let prerelease = ReleaseSummary {
+        prerelease: true,
+        ..release("v0.5.0-rc.1")
+    };
+    assert!(is_eligible(Channel::Preview, &final_release));
+    assert!(is_eligible(Channel::Preview, &prerelease));
+}
+
+#[test]
+fn best_update_on_stable_with_only_prereleases_is_none() {
+    let installed = parse("0.4.0");
+    let releases = [
+        ReleaseSummary {
+            prerelease: true,
+            ..release("v0.5.0-rc.1")
+        },
+        ReleaseSummary {
+            prerelease: true,
+            ..release("v0.5.0-rc.2")
+        },
+    ];
+    assert!(best_update(Channel::Stable, &installed, &releases).is_none());
+}
+
+#[test]
+fn best_update_on_preview_prefers_final_over_installed_rc() {
+    let installed = parse("0.5.0-rc.2");
+    let releases = [
+        release("v0.5.0"),
+        ReleaseSummary {
+            prerelease: true,
+            ..release("v0.5.0-rc.2")
+        },
+    ];
+    let result = best_update(Channel::Preview, &installed, &releases);
+    assert_eq!(result.map(|r| r.tag.as_str()), Some("v0.5.0"));
+}
+
+#[test]
+fn best_update_never_offers_a_downgrade() {
+    let installed = parse("0.5.0-rc.2");
+    let releases = [ReleaseSummary {
+        prerelease: true,
+        ..release("v0.5.0-rc.1")
+    }];
+    assert!(best_update(Channel::Preview, &installed, &releases).is_none());
+}
+
+#[test]
+fn best_update_when_installed_equals_newest_is_none() {
+    let installed = parse("0.5.0");
+    let releases = [release("v0.5.0")];
+    assert!(best_update(Channel::Stable, &installed, &releases).is_none());
+}
+
+#[test]
+fn rollback_target_ignores_installed_version() {
+    let releases = [
+        ReleaseSummary {
+            prerelease: true,
+            ..release("v0.5.0-rc.2")
+        },
+        release("v0.4.0"),
+    ];
+    let result = rollback_target(&releases);
+    assert_eq!(result.map(|r| r.tag.as_str()), Some("v0.4.0"));
+}
+
+#[test]
+fn rollback_target_with_no_final_releases_is_none() {
+    let releases = [ReleaseSummary {
+        prerelease: true,
+        ..release("v0.5.0-rc.2")
+    }];
+    assert!(rollback_target(&releases).is_none());
 }

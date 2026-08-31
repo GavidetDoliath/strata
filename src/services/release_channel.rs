@@ -277,5 +277,87 @@ impl PartialEq for Version {
 
 impl Eq for Version {}
 
+/// A single release, normalised from GitHub's API shape into the fields
+/// this module's eligibility rules need.
+///
+/// Deliberately free of `serde` derives: converting GitHub's JSON into this
+/// type is Task 4's job, kept strictly on its own side of the boundary this
+/// module enforces. This module never learns what GitHub's JSON looks like.
+#[derive(Clone, Debug)]
+pub struct ReleaseSummary {
+    pub tag: String,
+    pub version: Version,
+    pub draft: bool,
+    /// GitHub's own `prerelease` flag on the release, distinct from
+    /// whether `version` itself parsed with a prerelease suffix. Stable
+    /// eligibility requires both signals to agree; see [`is_eligible`].
+    pub prerelease: bool,
+    /// `None` when no published asset matches the running architecture --
+    /// an update the user cannot install must never be offered.
+    pub download_url: Option<String>,
+    pub published_at: Option<String>,
+    pub commit: Option<String>,
+    pub notes: String,
+}
+
+/// Whether `release` may be offered to a user on `channel`.
+///
+/// A draft is never eligible, on any channel: it is not a published
+/// release. Nor is a release with no installable asset for this
+/// architecture, since offering it would leave the user stuck.
+///
+/// On [`Channel::Stable`], both the parsed version and GitHub's own
+/// `prerelease` flag must agree that the release is final. This
+/// redundancy is a stated security requirement of issue #61: a release
+/// mislabelled on either signal alone must still be caught by the other.
+///
+/// On [`Channel::Preview`], both final and prerelease versions are
+/// eligible; only drafts and assetless releases are rejected.
+pub fn is_eligible(channel: Channel, release: &ReleaseSummary) -> bool {
+    if release.draft || release.download_url.is_none() {
+        return false;
+    }
+    match channel {
+        Channel::Stable => release.version.prerelease.is_none() && !release.prerelease,
+        Channel::Preview => true,
+    }
+}
+
+/// The newest eligible release strictly newer than `installed`, or `None`
+/// if there isn't one.
+///
+/// Filters `releases` by [`is_eligible`] for `channel`, then returns the
+/// maximum by [`Version`] ordering -- but only when that maximum is
+/// strictly greater than `installed`. This path must never offer a
+/// downgrade; use [`rollback_target`] for that instead.
+pub fn best_update<'a>(
+    channel: Channel,
+    installed: &Version,
+    releases: &'a [ReleaseSummary],
+) -> Option<&'a ReleaseSummary> {
+    let candidate = releases
+        .iter()
+        .filter(|release| is_eligible(channel, release))
+        .max_by(|a, b| a.version.cmp(&b.version))?;
+    (&candidate.version > installed).then_some(candidate)
+}
+
+/// The newest final release available, ignoring the installed version
+/// entirely.
+///
+/// Ignoring the installed version is precisely what makes a downgrade
+/// possible -- a user on a prerelease must be able to roll back to a
+/// stable release older than what they currently have installed. This is
+/// why `rollback_target` cannot reuse [`best_update`], which deliberately
+/// refuses to go backwards.
+pub fn rollback_target(releases: &[ReleaseSummary]) -> Option<&ReleaseSummary> {
+    releases
+        .iter()
+        .filter(|release| {
+            release.version.prerelease.is_none() && is_eligible(Channel::Stable, release)
+        })
+        .max_by(|a, b| a.version.cmp(&b.version))
+}
+
 #[cfg(test)]
 mod tests;

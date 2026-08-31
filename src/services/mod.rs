@@ -23,9 +23,11 @@ pub use preview::{
 pub(crate) use preview::{content_family, has_plain_text_extension};
 #[expect(
     unused_imports,
-    reason = "consumed by the channel-eligibility and update_check rewrites landing in later tasks"
+    reason = "consumed by the update_check rewrite landing in a later task"
 )]
-pub(crate) use release_channel::{BuildKind, Channel, Version};
+pub(crate) use release_channel::{
+    BuildKind, Channel, ReleaseSummary, Version, best_update, is_eligible, rollback_target,
+};
 pub(crate) use search::{SearchEvent, SearchHandle, SearchItem, index_tree};
 pub(crate) use update_check::{
     ReleaseMetadata, ReleaseNoteBlock, ReleaseNotes, UpdateCheck, check_for_updates,
