@@ -8,8 +8,9 @@
 //! get back structured, comparable values.
 #![expect(
     dead_code,
-    reason = "this is a leaf module with no callers yet; the channel-eligibility rules \
-              (Task 2) and the update_check rewrite (Task 4) wire it in"
+    reason = "Task 3 (build_info) wired in BuildKind and Version, but Channel, \
+              ReleaseSummary, is_eligible, best_update, and rollback_target still have \
+              no external caller; the update_check rewrite (Task 4) wires those in"
 )]
 
 use std::{cmp::Ordering, fmt};

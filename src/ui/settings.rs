@@ -373,7 +373,10 @@ fn updates_page(manager: Rc<ThemeManager>, update_notice: UpdateNoticeHandler) -
 
     append_heading(&preferences, "RELEASE NOTES");
     let current_notes = release_notes_card(
-        &format!("Current release · v{}", env!("CARGO_PKG_VERSION")),
+        &format!(
+            "Current release · v{}",
+            crate::build_info::installed_version()
+        ),
         "Loading release notes…",
     );
     preferences.append(&current_notes.container);
@@ -529,7 +532,7 @@ fn show_release_notes(card: &ReleaseNotesCard, release: &ReleaseMetadata) {
 }
 
 fn load_current_release_notes(card: &ReleaseNotesCard) {
-    let receiver = services::fetch_release_notes(env!("CARGO_PKG_VERSION"));
+    let receiver = services::fetch_release_notes(crate::build_info::RELEASE_VERSION_TAG);
     let card = card.clone();
     glib::timeout_add_local(Duration::from_millis(100), move || {
         match receiver.try_recv() {
@@ -581,7 +584,10 @@ fn update_check_row(
     let title = gtk::Label::new(Some("Check for updates"));
     title.set_xalign(0.0);
     title.add_css_class("settings-option-title");
-    let status = gtk::Label::new(Some(&format!("Version {}", env!("CARGO_PKG_VERSION"))));
+    let status = gtk::Label::new(Some(&format!(
+        "Version {}",
+        crate::build_info::installed_version()
+    )));
     status.set_xalign(0.0);
     status.set_wrap(true);
     status.set_use_markup(true);
@@ -633,7 +639,7 @@ fn update_check_row(
             available_notes.container.set_visible(false);
             available_notes.fallback.set_visible(false);
             button.set_sensitive(false);
-            let receiver = services::check_for_updates(env!("CARGO_PKG_VERSION"));
+            let receiver = services::check_for_updates(crate::build_info::RELEASE_VERSION_TAG);
             let checking = checking.clone();
             let status = status.clone();
             let button = button.clone();
@@ -829,7 +835,7 @@ pub(super) fn show_update_dialog(
         &format!("Strata v{} is available", release.version),
         &format!(
             "Installed v{}  →  Available v{}",
-            env!("CARGO_PKG_VERSION"),
+            crate::build_info::installed_version(),
             release.version
         ),
         "Download update",
@@ -1009,7 +1015,10 @@ fn shows_available_release_notes(result: &UpdateCheck) -> bool {
 fn update_check_message(result: &UpdateCheck) -> String {
     match result {
         UpdateCheck::UpToDate => {
-            format!("Up to date — version {}", env!("CARGO_PKG_VERSION"))
+            format!(
+                "Up to date — version {}",
+                crate::build_info::installed_version()
+            )
         }
         UpdateCheck::Available { release, .. } => format!(
             "Update available: <a href=\"{}\">v{}</a>",

@@ -23,7 +23,9 @@ pub use preview::{
 pub(crate) use preview::{content_family, has_plain_text_extension};
 #[expect(
     unused_imports,
-    reason = "consumed by the update_check rewrite landing in a later task"
+    reason = "BuildKind and Version are consumed by build_info (Task 3); Channel, \
+              ReleaseSummary, best_update, is_eligible, and rollback_target are consumed \
+              by the update_check rewrite landing in a later task"
 )]
 pub(crate) use release_channel::{
     BuildKind, Channel, ReleaseSummary, Version, best_update, is_eligible, rollback_target,
