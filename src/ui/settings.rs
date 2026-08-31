@@ -1085,7 +1085,12 @@ fn about_page() -> gtk::Widget {
     append_heading(&content, "BUILD INFORMATION");
     let build = gtk::Box::new(gtk::Orientation::Vertical, 0);
     build.add_css_class("about-details");
-    append_about_detail(&build, "Version", crate::build_info::VERSION, false);
+    let version = crate::build_info::installed_version().to_string();
+    append_about_detail(&build, "Version", &version, false);
+    let build_kind = crate::build_info::build_kind();
+    if build_kind != services::BuildKind::Stable {
+        append_about_detail(&build, "Build", build_kind.label(), false);
+    }
     append_about_detail(&build, "Commit", crate::build_info::COMMIT, true);
     content.append(&build);
 

@@ -47,10 +47,17 @@ fn release_version_tag_has_no_leading_v() {
     assert_eq!(RELEASE_VERSION_TAG, VERSION);
 }
 
-/// `installed_version()` must fall back gracefully -- never panic -- even
-/// when handed inputs `Version::parse` rejects outright.
+/// `installed_version()`'s fallback chain reads `RELEASE_TAG` and `VERSION`
+/// as `env!`-injected constants, not parameters, so this build's default
+/// values can't be swapped out to actually drive the function down its
+/// fallback branches from a test. Instead this exercises the building
+/// blocks the chain depends on: `Version::parse` must reject the malformed
+/// and empty inputs that would trigger a fallback, and the `"0.0.0"` floor
+/// the chain lands on if every real parse fails must itself always parse
+/// (this is what makes `installed_version()`'s final `.unwrap_or_else`
+/// branch panic-free).
 #[test]
-fn installed_version_fallback_chain_never_panics() {
+fn version_parse_rejects_invalid_input_and_accepts_the_fallback_floor() {
     assert!(Version::parse("not-a-version").is_none());
     assert!(Version::parse("").is_none());
     // The floor of the fallback chain must itself always parse.

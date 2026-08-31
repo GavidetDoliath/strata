@@ -24,14 +24,6 @@ pub const RELEASE_TAG: &str = env!("STRATA_RELEASE_TAG");
 /// Defaults to `"stable"` when `STRATA_BUILD_KIND` is unset, empty, or not
 /// one of those three values. Prefer [`build_kind`] over reading this
 /// directly -- it gives the parsed, comparable [`BuildKind`].
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "no production caller within Task 3; the channel-preference UI and the \
-                  update_check rewrite (Task 4) read this to decide preview eligibility"
-    )
-)]
 pub const BUILD_KIND: &str = env!("STRATA_BUILD_KIND");
 
 /// [`RELEASE_TAG`] with its leading `v` stripped, if present.
@@ -60,14 +52,6 @@ const fn strip_v_prefix(tag: &str) -> &str {
 /// This must fail closed, the same way [`crate::services::Channel::parse`]
 /// does: a build that cannot identify its own kind must present as an
 /// ordinary stable build, never as a preview.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "no production caller within Task 3; the channel-preference UI and the \
-                  update_check rewrite (Task 4) read this to decide preview eligibility"
-    )
-)]
 pub fn build_kind() -> BuildKind {
     match BUILD_KIND {
         "rc" => BuildKind::Rc,
