@@ -21,18 +21,19 @@ pub use preview::{
     Preview, PreviewContent, PreviewEvent, PreviewProvider, PreviewRequest, PreviewRequestId,
 };
 pub(crate) use preview::{content_family, has_plain_text_extension};
-#[expect(
-    unused_imports,
-    reason = "BuildKind and Version are consumed by build_info (Task 3); Channel, \
-              ReleaseSummary, best_update, is_eligible, and rollback_target are consumed \
-              by the update_check rewrite landing in a later task"
-)]
 pub(crate) use release_channel::{
-    BuildKind, Channel, ReleaseSummary, Version, best_update, is_eligible, rollback_target,
+    BuildKind, Channel, ReleaseSummary, Version, best_update, rollback_target,
 };
 pub(crate) use search::{SearchEvent, SearchHandle, SearchItem, index_tree};
 pub(crate) use update_check::{
     ReleaseMetadata, ReleaseNoteBlock, ReleaseNotes, UpdateCheck, check_for_updates,
     fetch_release_notes,
 };
+#[expect(
+    unused_imports,
+    reason = "RollbackCheck and check_rollback_target are consumed by update_check's own \
+              tests and are ready for a caller, but nothing outside services calls \
+              check_rollback_target yet: Task 8's rollback UI is what does that"
+)]
+pub(crate) use update_check::{RollbackCheck, check_rollback_target};
 pub(crate) use update_install::{UpdateInstall, install_update};

@@ -38,15 +38,6 @@ fn installed_version_agrees_with_version_for_a_default_build() {
     assert_eq!(installed_version().to_string(), VERSION);
 }
 
-/// `RELEASE_VERSION_TAG` feeds the legacy `&'static str`-typed lookups in
-/// `update_check` that still add their own leading `v`; it must never
-/// carry one itself, or those lookups would request a doubly-prefixed tag.
-#[test]
-fn release_version_tag_has_no_leading_v() {
-    assert!(!RELEASE_VERSION_TAG.starts_with('v'));
-    assert_eq!(RELEASE_VERSION_TAG, VERSION);
-}
-
 /// `installed_version()`'s fallback chain reads `RELEASE_TAG` and `VERSION`
 /// as `env!`-injected constants, not parameters, so this build's default
 /// values can't be swapped out to actually drive the function down its

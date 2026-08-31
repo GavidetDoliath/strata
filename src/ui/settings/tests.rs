@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use crate::services::{ReleaseMetadata, UpdateCheck};
+use crate::services::{BuildKind, ReleaseMetadata, UpdateCheck};
 
 use super::{
     COMPACT_NAVIGATION_BREAKPOINT, DIALOG_HEIGHT, DIALOG_MARGIN, DIALOG_WIDTH,
@@ -65,7 +65,11 @@ fn available_notes_are_shown_only_for_a_newer_release() {
             note_blocks: vec![crate::services::ReleaseNoteBlock::Paragraph(
                 "Changes".to_owned(),
             )],
+            kind: BuildKind::Stable,
+            tag: "v1.0.0".to_owned(),
+            published_at: None,
+            commit: None,
         },
-        download_url: None,
+        download_url: "https://example.test/download".to_owned(),
     }));
 }

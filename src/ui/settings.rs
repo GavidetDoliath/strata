@@ -11,7 +11,9 @@ use gtk::{gdk, glib, prelude::*, subclass::prelude::*};
 
 use crate::{
     assets::icons,
-    services::{self, ReleaseMetadata, ReleaseNoteBlock, ReleaseNotes, UpdateCheck, UpdateInstall},
+    services::{
+        self, Channel, ReleaseMetadata, ReleaseNoteBlock, ReleaseNotes, UpdateCheck, UpdateInstall,
+    },
 };
 
 #[cfg(test)]
@@ -532,7 +534,7 @@ fn show_release_notes(card: &ReleaseNotesCard, release: &ReleaseMetadata) {
 }
 
 fn load_current_release_notes(card: &ReleaseNotesCard) {
-    let receiver = services::fetch_release_notes(crate::build_info::RELEASE_VERSION_TAG);
+    let receiver = services::fetch_release_notes(crate::build_info::RELEASE_TAG);
     let card = card.clone();
     glib::timeout_add_local(Duration::from_millis(100), move || {
         match receiver.try_recv() {
@@ -639,7 +641,10 @@ fn update_check_row(
             available_notes.container.set_visible(false);
             available_notes.fallback.set_visible(false);
             button.set_sensitive(false);
-            let receiver = services::check_for_updates(crate::build_info::RELEASE_VERSION_TAG);
+            let receiver = services::check_for_updates(
+                Channel::Stable,
+                crate::build_info::installed_version(),
+            );
             let checking = checking.clone();
             let status = status.clone();
             let button = button.clone();
@@ -656,15 +661,11 @@ fn update_check_row(
                         match &result {
                             UpdateCheck::Available {
                                 release,
-                                download_url: Some(download_url),
+                                download_url,
                             } => {
                                 update_notice(Some((release.clone(), download_url.clone())));
                             }
-                            UpdateCheck::UpToDate
-                            | UpdateCheck::Available {
-                                download_url: None, ..
-                            } => update_notice(None),
-                            UpdateCheck::Failed(_) => {}
+                            UpdateCheck::UpToDate | UpdateCheck::Failed(_) => update_notice(None),
                         }
                         match &result {
                             UpdateCheck::Available {
@@ -672,10 +673,8 @@ fn update_check_row(
                                 download_url,
                             } => {
                                 show_release_notes(&available_notes, release);
-                                if let Some(download_url) = download_url {
-                                    *pending_download.borrow_mut() = Some(download_url.clone());
-                                    button.set_label("Install update");
-                                }
+                                *pending_download.borrow_mut() = Some(download_url.clone());
+                                button.set_label("Install update");
                             }
                             UpdateCheck::UpToDate | UpdateCheck::Failed(_) => {}
                         }

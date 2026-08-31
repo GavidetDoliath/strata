@@ -26,26 +26,6 @@ pub const RELEASE_TAG: &str = env!("STRATA_RELEASE_TAG");
 /// directly -- it gives the parsed, comparable [`BuildKind`].
 pub const BUILD_KIND: &str = env!("STRATA_BUILD_KIND");
 
-/// [`RELEASE_TAG`] with its leading `v` stripped, if present.
-///
-/// Exists only to feed `services::update_check`'s legacy
-/// `&'static str`-typed lookups (`check_for_updates`, `fetch_release_notes`),
-/// which build their own GitHub URLs by adding a `v` prefix back on; handing
-/// them [`RELEASE_TAG`] as-is would double it up. Task 4 rewrites those
-/// lookups to consume [`installed_version`] directly, at which point this
-/// constant can go away.
-pub const RELEASE_VERSION_TAG: &str = strip_v_prefix(RELEASE_TAG);
-
-const fn strip_v_prefix(tag: &str) -> &str {
-    match tag.as_bytes() {
-        [b'v', rest @ ..] => match std::str::from_utf8(rest) {
-            Ok(stripped) => stripped,
-            Err(_) => tag,
-        },
-        _ => tag,
-    }
-}
-
 /// Parses [`BUILD_KIND`], falling back to [`BuildKind::Stable`] for
 /// anything unrecognised.
 ///
