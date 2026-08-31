@@ -8,6 +8,7 @@ use std::{
     io::Cursor,
     os::unix::ffi::OsStrExt,
     path::{Path, PathBuf},
+    time::Instant,
 };
 
 use gtk::{gdk, gio, glib};
@@ -78,6 +79,7 @@ thread_local! {
 }
 
 pub fn prepare() -> Result<(), Box<dyn std::error::Error>> {
+    let started = Instant::now();
     gio::resources_register_include!("strata.gresource")?;
 
     let font_directory = glib::user_cache_dir()
@@ -89,6 +91,10 @@ pub fn prepare() -> Result<(), Box<dyn std::error::Error>> {
     let regular = font_directory.join("JetBrainsMono.ttf");
     write_if_changed(&regular, JETBRAINS_MONO)?;
     register_application_fonts([regular])?;
+    tracing::debug!(
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "bundled assets prepared"
+    );
 
     Ok(())
 }

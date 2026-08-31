@@ -22,7 +22,7 @@ pub enum UpdateInstall {
 /// Downloads, verifies, and installs `download_url` in place of the running executable.
 /// Runs off the GTK thread and reports the outcome once. Mirrors the manual install
 /// steps in the README: fetch the release archive, check its published `sha256`, and
-/// extract the `strata` binary over the current install.
+/// extract the `strata` binaries over the current install.
 pub fn install_update(download_url: String) -> Receiver<UpdateInstall> {
     let (sender, receiver) = mpsc::channel();
     let spawned = std::thread::Builder::new()
@@ -75,13 +75,22 @@ fn try_install(
         .arg("-C")
         .arg(&extract_dir))?;
 
-    let binary_path = find_binary(&extract_dir)?;
-    let staged = exe_dir.join(format!(".strata-update-{}.tmp", std::process::id()));
-    fs::copy(&binary_path, &staged)
-        .map_err(|error| format!("Could not stage the new binary: {error}"))?;
-    set_executable(&staged)?;
-    fs::rename(&staged, current_exe)
-        .map_err(|error| format!("Could not replace the installed binary: {error}"))?;
+    let package_dir = find_package_dir(&extract_dir)?;
+    install_executable(
+        &package_dir.join("strata-preview-helper"),
+        &exe_dir.join("strata-preview-helper"),
+        &exe_dir.join(format!(
+            ".strata-preview-helper-update-{}.tmp",
+            std::process::id()
+        )),
+        "preview helper",
+    )?;
+    install_executable(
+        &package_dir.join("strata"),
+        current_exe,
+        &exe_dir.join(format!(".strata-update-{}.tmp", std::process::id())),
+        "binary",
+    )?;
 
     Ok(())
 }
@@ -156,15 +165,28 @@ fn first_hash_token(text: &str) -> Option<String> {
     text.split_whitespace().next().map(str::to_ascii_lowercase)
 }
 
-fn find_binary(extract_dir: &Path) -> Result<PathBuf, String> {
+fn find_package_dir(extract_dir: &Path) -> Result<PathBuf, String> {
     let entries = fs::read_dir(extract_dir).map_err(|error| error.to_string())?;
     for entry in entries.flatten() {
-        let candidate = entry.path().join("strata");
-        if candidate.is_file() {
+        let candidate = entry.path();
+        if candidate.join("strata").is_file() && candidate.join("strata-preview-helper").is_file() {
             return Ok(candidate);
         }
     }
-    Err("Could not find the strata binary in the downloaded archive".to_owned())
+    Err("Could not find the Strata binaries in the downloaded archive".to_owned())
+}
+
+fn install_executable(
+    source: &Path,
+    destination: &Path,
+    staged: &Path,
+    label: &str,
+) -> Result<(), String> {
+    fs::copy(source, staged)
+        .map_err(|error| format!("Could not stage the new {label}: {error}"))?;
+    set_executable(staged)?;
+    fs::rename(staged, destination)
+        .map_err(|error| format!("Could not replace the installed {label}: {error}"))
 }
 
 fn set_executable(path: &Path) -> Result<(), String> {

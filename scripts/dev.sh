@@ -63,4 +63,5 @@ exec cargo watch \
   --watch data \
   --watch Cargo.toml \
   --watch build.rs \
-  --exec run
+  --exec "build --bins" \
+  --exec "run --bin strata"

@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+use crate::sandbox_devices::gpu_devices;
+
 use std::{
     fs, io,
     path::{Path, PathBuf},
@@ -95,8 +97,8 @@ pub(crate) fn parse(
     }
 
     let output = PrivateOutput::create().map_err(|error| error.to_string())?;
-    let executable = std::env::current_exe()
-        .map_err(|error| format!("Unable to locate the Strata executable: {error}"))?;
+    let executable = preview_helper_executable()
+        .map_err(|error| format!("Unable to locate the Strata preview helper: {error}"))?;
     let devices = if operation == ParseOperation::PreviewMedia {
         gpu_devices(Path::new("/dev"))
     } else {
@@ -157,6 +159,25 @@ pub(crate) fn parse(
     Ok(ParseOutput { data, page, pages })
 }
 
+fn preview_helper_executable() -> io::Result<PathBuf> {
+    let executable = std::env::current_exe()?;
+    let helper = executable
+        .parent()
+        .map(|directory| directory.join("strata-preview-helper"))
+        .unwrap_or_else(|| PathBuf::from("strata-preview-helper"));
+    if helper.is_file() {
+        Ok(helper)
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!(
+                "{} is missing; build or install both Strata binaries",
+                helper.display()
+            ),
+        ))
+    }
+}
+
 fn sandbox_command(
     executable: &Path,
     input: &Path,
@@ -213,7 +234,7 @@ fn sandbox_command(
         "/etc/ImageMagick-6",
         "--ro-bind",
     ]);
-    command.arg(executable).arg("/app/strata");
+    command.arg(executable).arg("/app/strata-preview-helper");
     command.arg("--ro-bind").arg(input).arg("/input");
     command.arg("--bind").arg(output).arg("/output");
     if operation == ParseOperation::PreviewMedia {
@@ -234,43 +255,13 @@ fn sandbox_command(
     command.args([
         "--fsize=33554432",
         "--",
-        "/app/strata",
-        "--preview-helper",
+        "/app/strata-preview-helper",
         operation.argument(),
         "/input",
     ]);
     command.arg(format!("/output/{}", operation.output_name()));
     command.arg(value.to_string());
     command
-}
-
-pub(crate) fn gpu_devices(dev: &Path) -> Vec<PathBuf> {
-    let mut devices = Vec::new();
-    if let Ok(entries) = fs::read_dir(dev.join("dri")) {
-        for entry in entries.flatten() {
-            if numbered_name(&entry.file_name(), "renderD") {
-                devices.push(entry.path());
-            }
-        }
-    }
-    if let Ok(entries) = fs::read_dir(dev) {
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            if name == "nvidiactl" || numbered_name(&name, "nvidia") {
-                devices.push(entry.path());
-            }
-        }
-    }
-    devices.sort();
-    devices
-}
-
-pub(crate) fn numbered_name(name: &std::ffi::OsStr, prefix: &str) -> bool {
-    name.to_str()
-        .and_then(|name| name.strip_prefix(prefix))
-        .is_some_and(|suffix| {
-            !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
-        })
 }
 
 fn valid_output(operation: ParseOperation, data: &[u8]) -> bool {

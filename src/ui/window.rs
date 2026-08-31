@@ -252,56 +252,92 @@ pub fn present_location(application: &gtk::Application, location: Option<PathBuf
     window.add_action(&search_action);
     application.set_accels_for_action("win.search", &["<Control>k"]);
 
-    let update_button = sidebar.update_notice.clone();
-    let update_area = sidebar.update_area.clone();
-    let update_label = sidebar.update_label.clone();
-    let available_update = Rc::new(RefCell::new(
-        None::<(crate::services::ReleaseMetadata, String)>,
-    ));
-    let available_for_click = available_update.clone();
-    let update_parent = window.clone().upcast::<gtk::Window>();
-    update_button.connect_clicked(move |_| {
-        let Some((release, download_url)) = available_for_click.borrow().clone() else {
-            return;
-        };
-        super::settings::show_update_dialog(&update_parent, &release, download_url);
-    });
-    let available_for_notice = available_update.clone();
-    let update_notice: super::settings::UpdateNoticeHandler = Rc::new(move |release| {
-        if let Some((release, download_url)) = release {
-            update_button.set_tooltip_text(Some(&format!("Install Strata v{}", release.version)));
-            update_label.set_text(&format!("v{} available", release.version));
-            *available_for_notice.borrow_mut() = Some((release, download_url));
-            update_area.set_visible(true);
-        } else {
-            available_for_notice.borrow_mut().take();
-            update_area.set_visible(false);
+    let settings_layer = Rc::new(RefCell::new(None::<gtk::Box>));
+    let build_settings_layer: Rc<dyn Fn() -> gtk::Box> = Rc::new({
+        let browser = browser.clone();
+        let settings = settings.clone();
+        let blurred_root = blurred_root.clone();
+        let theme_manager = theme_manager.clone();
+        let update_button = sidebar.update_notice.clone();
+        let update_area = sidebar.update_area.clone();
+        let update_label = sidebar.update_label.clone();
+        let update_parent = window.clone().upcast::<gtk::Window>();
+        move || {
+            let available_update = Rc::new(RefCell::new(
+                None::<(crate::services::ReleaseMetadata, String)>,
+            ));
+            let available_for_click = available_update.clone();
+            let update_parent = update_parent.clone();
+            update_button.connect_clicked(move |_| {
+                let Some((release, download_url)) = available_for_click.borrow().clone() else {
+                    return;
+                };
+                super::settings::show_update_dialog(&update_parent, &release, download_url);
+            });
+            let available_for_notice = available_update.clone();
+            let update_button = update_button.clone();
+            let update_area = update_area.clone();
+            let update_label = update_label.clone();
+            let update_notice: super::settings::UpdateNoticeHandler = Rc::new(move |release| {
+                if let Some((release, download_url)) = release {
+                    update_button
+                        .set_tooltip_text(Some(&format!("Install Strata v{}", release.version)));
+                    update_label.set_text(&format!("v{} available", release.version));
+                    *available_for_notice.borrow_mut() = Some((release, download_url));
+                    update_area.set_visible(true);
+                } else {
+                    available_for_notice.borrow_mut().take();
+                    update_area.set_visible(false);
+                }
+            });
+            super::settings::build_layer(
+                &browser,
+                &settings,
+                &blurred_root,
+                theme_manager.clone(),
+                update_notice,
+            )
         }
     });
-    let settings_layer = super::settings::build_layer(
-        &browser,
-        &settings,
-        &blurred_root,
-        theme_manager,
-        update_notice,
-    );
-    window_overlay.add_overlay(&settings_layer);
-    let shown_settings = settings_layer.clone();
-    let settings_button = settings.clone();
-    let settings_blurred_root = blurred_root.clone();
-    settings.connect_clicked(move |_| {
-        show_settings(&shown_settings, &settings_button, &settings_blurred_root);
+    let ensure_settings_layer: Rc<dyn Fn() -> gtk::Box> = Rc::new({
+        let settings_layer = settings_layer.clone();
+        let window_overlay = window_overlay.clone();
+        move || {
+            if let Some(layer) = settings_layer.borrow().as_ref() {
+                return layer.clone();
+            }
+            let layer = build_settings_layer();
+            window_overlay.add_overlay(&layer);
+            settings_layer.replace(Some(layer.clone()));
+            layer
+        }
     });
+    let show_lazy_settings: Rc<dyn Fn()> = Rc::new({
+        let ensure_settings_layer = ensure_settings_layer.clone();
+        let settings_button = settings.clone();
+        let settings_blurred_root = blurred_root.clone();
+        move || {
+            show_settings(
+                &ensure_settings_layer(),
+                &settings_button,
+                &settings_blurred_root,
+            );
+        }
+    });
+    // Preserve automatic update checks without constructing the hidden settings tree on
+    // the critical startup path. Opening settings before this timeout constructs it at once.
+    glib::timeout_add_local_once(Duration::from_secs(1), move || {
+        ensure_settings_layer();
+    });
+    let clicked_show_settings = show_lazy_settings.clone();
+    settings.connect_clicked(move |_| clicked_show_settings());
     let settings_shortcut = gtk::EventControllerKey::new();
-    let shown_settings = settings_layer.clone();
-    let settings_button = settings.clone();
-    let shortcut_blurred_root = blurred_root.clone();
     settings_shortcut.connect_key_pressed(move |_, key, _, modifiers| {
         if key != gtk::gdk::Key::comma || !modifiers.contains(gtk::gdk::ModifierType::CONTROL_MASK)
         {
             return glib::Propagation::Proceed;
         }
-        show_settings(&shown_settings, &settings_button, &shortcut_blurred_root);
+        show_lazy_settings();
         glib::Propagation::Stop
     });
     window.add_controller(settings_shortcut);

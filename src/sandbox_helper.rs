@@ -9,9 +9,8 @@ use std::{
 };
 
 use gdk_pixbuf::prelude::*;
-use gtk::gio;
 
-use crate::sandbox::{gpu_devices, numbered_name};
+use crate::sandbox_devices::{gpu_devices, numbered_name};
 
 const HARDWARE_ATTEMPT_TIME_LIMIT: Duration = Duration::from_secs(8);
 const HARDWARE_TOTAL_TIME_LIMIT: Duration = Duration::from_secs(12);
@@ -368,4 +367,5 @@ fn render_media(path: &Path, size: i32) -> Result<Vec<u8>, String> {
 }
 
 #[cfg(test)]
+#[path = "sandbox_helper/tests.rs"]
 mod tests;

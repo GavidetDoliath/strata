@@ -69,6 +69,7 @@ sha256sum --check strata-<version>-<target>.tar.gz.sha256
 gh attestation verify strata-<version>-<target>.tar.gz --repo LGSE/strata
 tar -xzf strata-<version>-<target>.tar.gz
 install -Dm755 strata-<version>-<target>/strata ~/.local/bin/strata
+install -Dm755 strata-<version>-<target>/strata-preview-helper ~/.local/bin/strata-preview-helper
 ```
 
 Each archive also contains `SOURCE_COMMIT`, which records the exact commit used for the build.
@@ -195,17 +196,35 @@ sudo pacman -S --needed base-devel rust bubblewrap fontconfig gtk4 gtksourceview
 Run Strata:
 
 ```bash
-cargo run
+cargo build --bins
+cargo run --bin strata
 ```
 
-For development, run Strata in auto-reload mode. The app rebuilds and restarts
-when code or bundled assets change. On Arch, Debian/Ubuntu, and Fedora,
-`start-dev` installs missing native dependencies (prompting for `sudo`) and
-installs `cargo-watch` automatically when needed:
+Building both binaries ensures the sandboxed preview helper is available beside the main executable. The same non-reloading workflow is available as one command:
+
+```bash
+make run-dev
+```
+
+For development with auto-reloading, use:
 
 ```bash
 make start-dev
 ```
+
+The app rebuilds and restarts when code or bundled assets change. On Arch,
+Debian/Ubuntu, and Fedora, `start-dev` installs missing native dependencies
+(prompting for `sudo`) and installs `cargo-watch` automatically when needed.
+
+To build an optimized release and replace the local installation under
+`~/.local/opt/strata`, run:
+
+```bash
+make install-local
+```
+
+This stops a running Strata instance, installs both binaries, and refreshes the
+`~/.local/bin/strata` symlink.
 
 Run the standard quality checks:
 

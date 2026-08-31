@@ -30,6 +30,8 @@ fn sandbox_exposes_only_runtime_input_and_private_output() {
     assert!(joined.contains("--as=2147483648"));
     assert!(joined.contains("--cpu=10"));
     assert!(joined.contains("--fsize=33554432"));
+    assert!(joined.contains("--ro-bind /tmp/strata /app/strata-preview-helper"));
+    assert!(joined.contains("/app/strata-preview-helper preview-pdf /input /output/result.png 2"));
     // RLIMIT_NPROC counts every process owned by the host user, not just the
     // sandbox, and can prevent legitimate media decoders from starting.
     assert!(!joined.contains("--nproc"));

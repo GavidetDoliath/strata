@@ -155,7 +155,7 @@ jobs:
           key: release-${{ matrix.target }}
 
       - name: Build release binary
-        run: cargo build --release --locked --target "${{ matrix.target }}"
+        run: cargo build --release --locked --target "${{ matrix.target }}" --bins
 
       - name: Package binary
         env:
@@ -166,6 +166,7 @@ jobs:
           package="strata-${VERSION}-${TARGET}"
           mkdir -p "dist/$package"
           install -m 755 "target/$TARGET/release/strata" "dist/$package/strata"
+          install -m 755 "target/$TARGET/release/strata-preview-helper" "dist/$package/strata-preview-helper"
           printf '%s\n' "$SOURCE_SHA" > "dist/$package/SOURCE_COMMIT"
           cp README.md LICENSE THIRD_PARTY_LICENSES.md "dist/$package/"
           tar -C dist -czf "dist/$package.tar.gz" "$package"

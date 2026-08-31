@@ -175,6 +175,8 @@ pub fn build_layer(
     let page = gtk::Box::new(gtk::Orientation::Vertical, 0);
     page.add_css_class("settings-page");
     page.set_hexpand(true);
+    page.set_vexpand(true);
+    page.set_overflow(gtk::Overflow::Hidden);
     let titlebar = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     titlebar.add_css_class("settings-titlebar");
     let title = gtk::Label::new(Some("General"));
@@ -196,6 +198,7 @@ pub fn build_layer(
         .transition_duration(120)
         .hhomogeneous(false)
         .vhomogeneous(false)
+        .overflow(gtk::Overflow::Hidden)
         .hexpand(true)
         .vexpand(true)
         .build();
@@ -1527,6 +1530,8 @@ fn scrollable_page(content: &gtk::Box, class: Option<&str>) -> gtk::Widget {
         .child(content)
         .hscrollbar_policy(gtk::PolicyType::Never)
         .vscrollbar_policy(gtk::PolicyType::Automatic)
+        .propagate_natural_height(false)
+        .min_content_height(1)
         .hexpand(true)
         .vexpand(true)
         .build();
