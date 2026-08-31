@@ -4925,14 +4925,23 @@ fn set_cut_path_style(row: &gtk::Box, cut: bool) {
     }
 }
 
+fn basename_field_error(name: &str) -> Option<&'static str> {
+    if name.is_empty() {
+        None
+    } else {
+        validate_basename(name).err()
+    }
+}
+
 pub(super) fn update_basename_validation(field: &gtk::Entry) -> bool {
-    match validate_basename(field.text().as_str()) {
-        Ok(()) => {
+    let text = field.text();
+    match basename_field_error(text.as_str()) {
+        None => {
             field.remove_css_class("error");
             field.set_tooltip_text(None);
-            true
+            !text.is_empty()
         }
-        Err(message) => {
+        Some(message) => {
             field.add_css_class("error");
             field.set_tooltip_text(Some(message));
             false
