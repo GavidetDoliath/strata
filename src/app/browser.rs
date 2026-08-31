@@ -124,6 +124,7 @@ pub enum BrowserEvent {
     LocationNavigationRejected {
         error: LocationValidationError,
     },
+    EmptyTrashRequested,
 }
 
 type Observer = Rc<dyn Fn(BrowserEvent)>;
@@ -1017,6 +1018,10 @@ impl Browser {
 
     pub fn open_location(&self, location: Location) {
         self.emit(BrowserEvent::OpenRequested { location });
+    }
+
+    pub fn request_empty_trash(&self) {
+        self.emit(BrowserEvent::EmptyTrashRequested);
     }
 
     pub fn activate(self: &Rc<Self>, depth: usize, position: usize) {
