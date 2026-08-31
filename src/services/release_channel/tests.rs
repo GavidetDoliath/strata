@@ -43,12 +43,28 @@ fn equal_versions_compare_equal() {
 }
 
 #[test]
-fn nightly_outranks_rc_for_the_same_core() {
-    // Pinned convention: within an equal core, a nightly build compares
-    // greater than a release candidate. This is an arbitrary but explicit
-    // choice (see BuildKind's declaration order) -- if it ever changes,
-    // this test must change with it.
-    assert!(parse("0.5.0-nightly.20260901") > parse("0.5.0-rc.1"));
+fn rc_outranks_nightly_for_the_same_core() {
+    // Pinned by D5: within an equal core, a release candidate compares
+    // greater than a nightly build. This matches semver §11's alphanumeric
+    // comparison of prerelease identifiers ("nightly" sorts before "rc"),
+    // and reflects that once an RC is cut for a core version, that line
+    // has stabilized -- a same-core nightly should never outrank it.
+    assert!(parse("0.5.0-rc.1") > parse("0.5.0-nightly.20260901"));
+}
+
+#[test]
+fn nightly_suffix_does_not_collide_with_the_next_days_date() {
+    // Regression test: the ordinal must not be a packed `date * 1000 + n`
+    // integer, since the grammar places no bound on `N`. A large suffix
+    // must never spill into the date component.
+    assert!(parse("0.5.0-nightly.20260901.1000") != parse("0.5.0-nightly.20260902"));
+    assert!(parse("0.5.0-nightly.20260901.1000") < parse("0.5.0-nightly.20260902"));
+}
+
+#[test]
+fn nightly_large_suffix_parses_and_round_trips() {
+    let version = parse("v0.5.0-nightly.20260901.1000");
+    assert_eq!(version.to_string(), "0.5.0-nightly.20260901.1000");
 }
 
 #[test]

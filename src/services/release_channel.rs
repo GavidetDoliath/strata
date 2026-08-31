@@ -55,12 +55,17 @@ impl Channel {
 /// single "preview" preference.
 ///
 /// Declaration order pins precedence for prereleases sharing a core version
-/// (see [`Version`]'s `Ord` impl): `Rc` sorts below `Nightly`.
+/// (see [`Version`]'s `Ord` impl): per **D5**, `Nightly` sorts below `Rc`.
+/// This matches semver §11, which compares prerelease identifiers
+/// alphanumerically ("nightly" sorts before "rc"), so external tooling
+/// agrees with us; and once an RC has been cut for a core version, that
+/// line has stabilized, so pulling a preview user from a curated candidate
+/// onto a same-core nightly would be a stability regression.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum BuildKind {
     Stable,
-    Rc,
     Nightly,
+    Rc,
 }
 
 impl BuildKind {
@@ -74,12 +79,35 @@ impl BuildKind {
     }
 }
 
+/// A comparable ordinal for a prerelease build.
+///
+/// For an RC, `primary` is the candidate number and `suffix` is always
+/// zero. For a nightly, `primary` is the `YYYYMMDD` date and `suffix` is
+/// the optional `.N` disambiguator (zero when absent).
+///
+/// These are kept as two separate fields, ordered lexicographically,
+/// rather than packed into a single integer. Packing (e.g. `date * 1000 +
+/// n`) would let an unbounded `.N` spill into the date component -- the
+/// grammar places no bound on `N` -- silently corrupting both the ordering
+/// and the round-tripped `Display` output. Two fields cannot collide this
+/// way.
+///
+/// Comparing an RC's `primary` against a nightly's `primary` would be
+/// comparing a small integer against a date, which is meaningless; see
+/// [`Version`]'s `Ord` impl, which only ever compares two `Ordinal`s after
+/// confirming both sides share the same [`BuildKind`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct Ordinal {
+    primary: u64,
+    suffix: u64,
+}
+
 /// A parsed prerelease suffix: its kind, an orderable ordinal, and the
 /// original text as published.
 #[derive(Clone, Debug)]
 pub struct Prerelease {
     kind: BuildKind,
-    ordinal: u64,
+    ordinal: Ordinal,
     // Preserved so a later task can display the maintainer's exact
     // published tag; not yet read (see the module-level dead_code note).
     raw: String,
@@ -130,13 +158,16 @@ fn parse_prerelease(raw: &str, suffix: &str) -> Option<Prerelease> {
     let mut parts = suffix.split('.');
     match parts.next()? {
         "rc" => {
-            let ordinal = parse_strict_u64(parts.next()?)?;
+            let n = parse_strict_u64(parts.next()?)?;
             if parts.next().is_some() {
                 return None;
             }
             Some(Prerelease {
                 kind: BuildKind::Rc,
-                ordinal,
+                ordinal: Ordinal {
+                    primary: n,
+                    suffix: 0,
+                },
                 raw: raw.to_string(),
             })
         }
@@ -155,7 +186,10 @@ fn parse_prerelease(raw: &str, suffix: &str) -> Option<Prerelease> {
             }
             Some(Prerelease {
                 kind: BuildKind::Nightly,
-                ordinal: date * 1000 + suffix_n,
+                ordinal: Ordinal {
+                    primary: date,
+                    suffix: suffix_n,
+                },
                 raw: raw.to_string(),
             })
         }
@@ -190,10 +224,10 @@ impl fmt::Display for Version {
         write!(f, "{major}.{minor}.{patch}")?;
         match &self.prerelease {
             Some(prerelease) => match prerelease.kind {
-                BuildKind::Rc => write!(f, "-rc.{}", prerelease.ordinal),
+                BuildKind::Rc => write!(f, "-rc.{}", prerelease.ordinal.primary),
                 BuildKind::Nightly => {
-                    let date = prerelease.ordinal / 1000;
-                    let suffix_n = prerelease.ordinal % 1000;
+                    let date = prerelease.ordinal.primary;
+                    let suffix_n = prerelease.ordinal.suffix;
                     if suffix_n == 0 {
                         write!(f, "-nightly.{date}")
                     } else {
@@ -210,7 +244,13 @@ impl fmt::Display for Version {
 impl Ord for Version {
     /// Per semver §11: compare core triples first; for equal cores, a
     /// prerelease is always less than a final release; for two prereleases
-    /// on an equal core, compare kind then ordinal.
+    /// on an equal core, compare `kind` first and *only then* `ordinal`.
+    ///
+    /// `kind` must be compared first: an RC's ordinal (a small candidate
+    /// number) and a nightly's ordinal (a date) are different quantities
+    /// and are never meaningfully comparable. Short-circuiting on `kind`
+    /// via `then_with` guarantees `ordinal.cmp` only ever runs when both
+    /// sides share the same [`BuildKind`].
     fn cmp(&self, other: &Self) -> Ordering {
         self.core
             .cmp(&other.core)
