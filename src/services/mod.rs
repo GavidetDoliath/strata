@@ -3,6 +3,7 @@
 mod file_source;
 mod operations;
 mod preview;
+mod release_channel;
 mod search;
 mod update_check;
 mod update_install;
@@ -20,6 +21,11 @@ pub use preview::{
     Preview, PreviewContent, PreviewEvent, PreviewProvider, PreviewRequest, PreviewRequestId,
 };
 pub(crate) use preview::{content_family, has_plain_text_extension};
+#[expect(
+    unused_imports,
+    reason = "consumed by the channel-eligibility and update_check rewrites landing in later tasks"
+)]
+pub(crate) use release_channel::{BuildKind, Channel, Version};
 pub(crate) use search::{SearchEvent, SearchHandle, SearchItem, index_tree};
 pub(crate) use update_check::{
     ReleaseMetadata, ReleaseNoteBlock, ReleaseNotes, UpdateCheck, check_for_updates,
