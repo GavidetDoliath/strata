@@ -65,12 +65,6 @@ pub enum UpdateCheck {
 /// from a preview build. Mirrors [`UpdateCheck`]'s shape: `Unavailable`
 /// covers both "no final release exists" and "already on the target",
 /// neither of which is an error.
-#[expect(
-    dead_code,
-    reason = "wired into the check_rollback_target chain (Task 4), but nothing in \
-              production calls check_rollback_target yet: Task 8's rollback UI is what \
-              does that"
-)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RollbackCheck {
     Available {
@@ -236,19 +230,6 @@ fn available_check(release: &ReleaseSummary) -> UpdateCheck {
 
 /// Builds the `RollbackCheck` for an eligible release; see [`available_check`]
 /// for why the `None` arm is unreachable in practice but handled anyway.
-// `cfg_attr(not(test), ...)`: this module's own tests call `select_rollback`
-// directly, which reaches this function too, so a plain `#[expect]` here
-// would be an unfulfilled expectation under `cargo test`/`clippy
-// --all-targets`.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "wired into the check_rollback_target chain (Task 4), but nothing in \
-                  production calls check_rollback_target yet: Task 8's rollback UI is \
-                  what does that"
-    )
-)]
 fn available_rollback(release: &ReleaseSummary) -> RollbackCheck {
     match &release.download_url {
         Some(download_url) => RollbackCheck::Available {
@@ -277,18 +258,6 @@ fn select_update(
 /// [`rollback_target`] finds nothing, or when it finds exactly what is
 /// already installed -- rolling back to the running version is not a
 /// meaningful action.
-// See the `cfg_attr` note on `available_rollback` above: this module's own
-// tests call this directly, so the `expect` only applies outside test
-// builds.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "wired into the check_rollback_target chain (Task 4), but nothing in \
-                  production calls check_rollback_target yet: Task 8's rollback UI is \
-                  what does that"
-    )
-)]
 fn select_rollback(installed: &Version, releases: &[ReleaseSummary]) -> RollbackCheck {
     match rollback_target(releases) {
         Some(release) if release.version != *installed => available_rollback(release),
@@ -307,12 +276,6 @@ fn fetch_update(channel: Channel, installed: &Version) -> UpdateCheck {
     }
 }
 
-#[expect(
-    dead_code,
-    reason = "wired into the check_rollback_target chain (Task 4), but nothing in \
-              production calls check_rollback_target yet: Task 8's rollback UI is what \
-              does that"
-)]
 fn fetch_rollback(installed: &Version) -> RollbackCheck {
     match fetch_preview() {
         Ok(releases) => select_rollback(installed, &releases),
@@ -558,12 +521,6 @@ pub fn check_for_updates(channel: Channel, installed: Version) -> Receiver<Updat
 
 /// Queries the newest final release off the GTK thread, for switching back
 /// to [`Channel::Stable`] from a prerelease build.
-#[expect(
-    dead_code,
-    reason = "wired into the check_rollback_target chain (Task 4), but nothing in \
-              production calls check_rollback_target yet: Task 8's rollback UI is what \
-              does that"
-)]
 pub fn check_rollback_target(installed: Version) -> Receiver<RollbackCheck> {
     let (sender, receiver) = mpsc::channel();
     let spawned = std::thread::Builder::new()

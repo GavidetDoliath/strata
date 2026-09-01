@@ -13,7 +13,7 @@ use crate::{
     assets::icons,
     services::{
         self, BuildKind, Channel, InstallRequest, ReleaseMetadata, ReleaseNoteBlock, ReleaseNotes,
-        UpdateCheck, UpdateInstall, Version,
+        RollbackCheck, UpdateCheck, UpdateInstall, Version,
     },
 };
 
@@ -380,6 +380,10 @@ fn updates_page(manager: Rc<ThemeManager>, update_notice: UpdateNoticeHandler) -
     );
     preferences.append(&auto_check_row);
     preferences.append(&update_row);
+
+    if crate::build_info::build_kind() != BuildKind::Stable {
+        preferences.append(&rollback_option(manager.clone()));
+    }
 
     append_heading(&preferences, "RELEASE NOTES");
     let current_notes = release_notes_card(
@@ -807,70 +811,319 @@ fn update_check_row(
             progress.remove_css_class("error");
             button.set_sensitive(false);
             let receiver = services::install_update(request);
-            let checking = checking.clone();
-            let status = status.clone();
-            let button = button.clone();
-            let installed = installed.clone();
-            let progress = progress.clone();
-            glib::timeout_add_local(Duration::from_millis(100), move || {
-                loop {
-                    match receiver.try_recv() {
-                        Ok(UpdateInstall::Downloading { downloaded, total }) => {
-                            if let Some(total) = total.filter(|total| *total > 0) {
-                                let fraction = (downloaded as f64 / total as f64).clamp(0.0, 1.0);
-                                progress.set_fraction(fraction);
-                                status.set_text(&format!(
-                                    "Downloading update… {:.0}%",
-                                    fraction * 100.0
-                                ));
-                            } else {
-                                progress.pulse();
-                                status.set_text(&format!(
-                                    "Downloading update… {:.1} MB",
-                                    downloaded as f64 / 1_048_576.0
-                                ));
-                            }
-                        }
-                        Ok(UpdateInstall::Verifying) => {
-                            status.set_text("Verifying update…");
-                        }
-                        Ok(UpdateInstall::Installing) => {
-                            progress.set_fraction(1.0);
-                            status.set_text("Installing update…");
-                        }
-                        Ok(UpdateInstall::Installed) => {
-                            status.set_text("Update installed — restart to apply");
-                            button.set_label("Restart now");
-                            button.set_sensitive(true);
-                            installed.set(true);
-                            checking.set(false);
-                            return glib::ControlFlow::Break;
-                        }
-                        Ok(UpdateInstall::Failed(message)) => {
-                            status.set_text(&format!("Couldn't install update: {message}"));
-                            progress.add_css_class("error");
-                            button.set_label("Check now");
-                            button.set_sensitive(true);
-                            checking.set(false);
-                            return glib::ControlFlow::Break;
-                        }
-                        Err(TryRecvError::Empty) => return glib::ControlFlow::Continue,
-                        Err(TryRecvError::Disconnected) => {
-                            status.set_text("Couldn't install update");
-                            progress.add_css_class("error");
-                            button.set_label("Check now");
-                            button.set_sensitive(true);
-                            checking.set(false);
-                            return glib::ControlFlow::Break;
-                        }
+            let progress_for_progress = progress.clone();
+            let status_for_progress = status.clone();
+            let checking_for_installed = checking.clone();
+            let status_for_installed = status.clone();
+            let button_for_installed = button.clone();
+            let installed_for_installed = installed.clone();
+            let checking_for_failed = checking.clone();
+            let status_for_failed = status.clone();
+            let button_for_failed = button.clone();
+            let progress_for_failed = progress.clone();
+            drive_install(
+                receiver,
+                move |event| {
+                    apply_install_progress(&status_for_progress, &progress_for_progress, event)
+                },
+                move || {
+                    status_for_installed.set_text("Update installed — restart to apply");
+                    button_for_installed.set_label("Restart now");
+                    button_for_installed.set_sensitive(true);
+                    installed_for_installed.set(true);
+                    checking_for_installed.set(false);
+                },
+                move |message| {
+                    match message {
+                        Some(message) => status_for_failed
+                            .set_text(&format!("Couldn't install update: {message}")),
+                        None => status_for_failed.set_text("Couldn't install update"),
                     }
-                }
-            });
+                    progress_for_failed.add_css_class("error");
+                    button_for_failed.set_label("Check now");
+                    button_for_failed.set_sensitive(true);
+                    checking_for_failed.set(false);
+                },
+            );
         } else {
             clicked_check();
         }
     });
     (row, run_check)
+}
+
+/// The three non-terminal states [`drive_install`] reports through
+/// `on_progress`. Keeping this separate from [`UpdateInstall`] means callers
+/// never need to (incorrectly) handle `Installed`/`Failed` in that closure --
+/// those terminal states are always reported through the driver's other two
+/// callbacks instead.
+enum InstallProgress {
+    Downloading { downloaded: u64, total: Option<u64> },
+    Verifying,
+    Installing,
+}
+
+/// Drives an install `receiver` on the GTK main loop until it reports a
+/// terminal outcome, then stops.
+///
+/// This is the shared shape behind both of `update_check_row`'s and
+/// `show_update_dialog`'s (and now `rollback_option`'s) install flows: poll
+/// `receiver` every 100ms, forward non-terminal updates to `on_progress`,
+/// and invoke exactly one of `on_installed`/`on_failed` once a terminal
+/// state is reached. Deliberately does *not* format any status text itself
+/// -- the three existing call sites render the same states with slightly
+/// different copy, and this only extracts the polling/control-flow
+/// plumbing they had all duplicated, not their (intentionally distinct)
+/// wording. `on_failed` receives `Some(message)` for an explicit
+/// [`UpdateInstall::Failed`] or `None` when the receiver disconnected
+/// without ever reporting one, since callers render those two cases
+/// differently too.
+fn drive_install(
+    receiver: std::sync::mpsc::Receiver<UpdateInstall>,
+    on_progress: impl Fn(InstallProgress) + 'static,
+    on_installed: impl Fn() + 'static,
+    on_failed: impl Fn(Option<String>) + 'static,
+) {
+    glib::timeout_add_local(Duration::from_millis(100), move || {
+        loop {
+            match receiver.try_recv() {
+                Ok(UpdateInstall::Downloading { downloaded, total }) => {
+                    on_progress(InstallProgress::Downloading { downloaded, total });
+                }
+                Ok(UpdateInstall::Verifying) => on_progress(InstallProgress::Verifying),
+                Ok(UpdateInstall::Installing) => on_progress(InstallProgress::Installing),
+                Ok(UpdateInstall::Installed) => {
+                    on_installed();
+                    return glib::ControlFlow::Break;
+                }
+                Ok(UpdateInstall::Failed(message)) => {
+                    on_failed(Some(message));
+                    return glib::ControlFlow::Break;
+                }
+                Err(TryRecvError::Empty) => return glib::ControlFlow::Continue,
+                Err(TryRecvError::Disconnected) => {
+                    on_failed(None);
+                    return glib::ControlFlow::Break;
+                }
+            }
+        }
+    });
+}
+
+/// `update_check_row`'s and `rollback_option`'s shared progress rendering:
+/// both use identical "Downloading update… "/"Verifying update…"/"Installing
+/// update…" copy, unlike `show_update_dialog`'s dialog-specific wording.
+fn apply_install_progress(
+    status: &gtk::Label,
+    progress: &gtk::ProgressBar,
+    event: InstallProgress,
+) {
+    match event {
+        InstallProgress::Downloading { downloaded, total } => {
+            if let Some(total) = total.filter(|total| *total > 0) {
+                let fraction = (downloaded as f64 / total as f64).clamp(0.0, 1.0);
+                progress.set_fraction(fraction);
+                status.set_text(&format!("Downloading update… {:.0}%", fraction * 100.0));
+            } else {
+                progress.pulse();
+                status.set_text(&format!(
+                    "Downloading update… {:.1} MB",
+                    downloaded as f64 / 1_048_576.0
+                ));
+            }
+        }
+        InstallProgress::Verifying => status.set_text("Verifying update…"),
+        InstallProgress::Installing => {
+            progress.set_fraction(1.0);
+            status.set_text("Installing update…");
+        }
+    }
+}
+
+/// The "Return to stable" row: visible only when the running build itself
+/// is not [`BuildKind::Stable`] (see the `updates_page` call site), never
+/// gated on the *selected* channel preference -- gating on the preference
+/// would strand exactly the user who most needs this exit: someone running
+/// an RC who has already switched their preference back to Stable.
+///
+/// Mirrors `update_check_row`'s two-step check/confirm/install/restart
+/// button flow: a first click resolves the newest stable release via
+/// [`services::check_rollback_target`], and only a second, explicit click
+/// starts the install -- the issue mandates confirmation before replacing
+/// binaries, and this reuses the same idiom already used for ordinary
+/// updates rather than introducing a new confirmation widget.
+fn rollback_option(manager: Rc<ThemeManager>) -> gtk::Box {
+    let row = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    row.add_css_class("settings-option");
+    let summary = gtk::Box::new(gtk::Orientation::Horizontal, 16);
+    summary.set_vexpand(true);
+    let copy = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    copy.set_hexpand(true);
+    copy.set_valign(gtk::Align::Center);
+    let title = gtk::Label::new(Some("Return to stable"));
+    title.set_xalign(0.0);
+    title.add_css_class("settings-option-title");
+    let status = gtk::Label::new(Some(
+        "Replace this preview build with the newest stable release.",
+    ));
+    status.set_xalign(0.0);
+    status.set_wrap(true);
+    status.add_css_class("settings-option-description");
+    copy.append(&title);
+    copy.append(&status);
+    let progress = gtk::ProgressBar::new();
+    progress.add_css_class("settings-update-progress");
+    progress.set_hexpand(true);
+    progress.set_visible(false);
+    copy.append(&progress);
+    let button = gtk::Button::with_label("Check for stable release");
+    button.add_css_class("settings-update-check");
+    button.set_valign(gtk::Align::Center);
+    summary.append(&copy);
+    summary.append(&button);
+    row.append(&summary);
+
+    let checking = Rc::new(Cell::new(false));
+    // Set once a check finds a stable release to roll back to; consumed by
+    // the button's next click instead of re-running a check.
+    let pending_download = Rc::new(RefCell::new(None::<InstallRequest>));
+    // Set once the rollback finishes, so the next click restarts instead of
+    // re-checking.
+    let installed = Rc::new(Cell::new(false));
+
+    let run_check: Rc<dyn Fn()> = Rc::new({
+        let checking = checking.clone();
+        let status = status.clone();
+        let button = button.clone();
+        let pending_download = pending_download.clone();
+        let installed = installed.clone();
+        let progress = progress.clone();
+        move || {
+            if checking.replace(true) {
+                return;
+            }
+            *pending_download.borrow_mut() = None;
+            installed.set(false);
+            button.set_label("Check for stable release");
+            progress.set_fraction(0.0);
+            progress.set_visible(false);
+            progress.remove_css_class("error");
+            status.set_text("Checking for the latest stable release…");
+            button.set_sensitive(false);
+            let receiver = services::check_rollback_target(crate::build_info::installed_version());
+            let checking = checking.clone();
+            let status = status.clone();
+            let button = button.clone();
+            let pending_download = pending_download.clone();
+            glib::timeout_add_local(Duration::from_millis(100), move || {
+                match receiver.try_recv() {
+                    Ok(result) => {
+                        match result {
+                            RollbackCheck::Available {
+                                release,
+                                download_url,
+                            } => {
+                                status.set_text(&format!(
+                                    "Stable v{} is available. Confirm to install it and return to \
+                                 stable.",
+                                    release.version
+                                ));
+                                *pending_download.borrow_mut() = Some(InstallRequest {
+                                    download_url,
+                                    version: release.version,
+                                });
+                                button.set_label("Return to stable");
+                            }
+                            RollbackCheck::Unavailable => {
+                                status.set_text("No stable release is available to return to yet.");
+                            }
+                            RollbackCheck::Failed(message) => {
+                                status.set_text(&format!(
+                                    "Couldn't check for a stable release: {message}"
+                                ));
+                            }
+                        }
+                        button.set_sensitive(true);
+                        checking.set(false);
+                        glib::ControlFlow::Break
+                    }
+                    Err(TryRecvError::Empty) => glib::ControlFlow::Continue,
+                    Err(TryRecvError::Disconnected) => {
+                        status.set_text("Couldn't check for a stable release");
+                        button.set_sensitive(true);
+                        checking.set(false);
+                        glib::ControlFlow::Break
+                    }
+                }
+            });
+        }
+    });
+
+    let clicked_check = run_check.clone();
+    button.connect_clicked(move |button| {
+        if installed.get() {
+            restart_application(button);
+            return;
+        }
+        if let Some(request) = pending_download.borrow_mut().take() {
+            if checking.replace(true) {
+                return;
+            }
+            status.set_text("Downloading stable release…");
+            progress.set_fraction(0.0);
+            progress.set_visible(true);
+            progress.remove_css_class("error");
+            button.set_sensitive(false);
+            let receiver = services::install_update(request);
+            let progress_for_progress = progress.clone();
+            let status_for_progress = status.clone();
+            let checking_for_installed = checking.clone();
+            let status_for_installed = status.clone();
+            let button_for_installed = button.clone();
+            let installed_for_installed = installed.clone();
+            let manager_for_installed = manager.clone();
+            let checking_for_failed = checking.clone();
+            let status_for_failed = status.clone();
+            let button_for_failed = button.clone();
+            let progress_for_failed = progress.clone();
+            let pending_download_for_failed = pending_download.clone();
+            drive_install(
+                receiver,
+                move |event| {
+                    apply_install_progress(&status_for_progress, &progress_for_progress, event)
+                },
+                move || {
+                    // Only flip the persisted channel once the install has
+                    // actually succeeded -- a failed rollback must leave
+                    // the user on Preview and able to retry.
+                    manager_for_installed.set_release_channel(Channel::Stable);
+                    status_for_installed.set_text("Stable release installed — restart to apply");
+                    button_for_installed.set_label("Restart now");
+                    button_for_installed.set_sensitive(true);
+                    installed_for_installed.set(true);
+                    checking_for_installed.set(false);
+                },
+                move |message| {
+                    match message {
+                        Some(message) => status_for_failed
+                            .set_text(&format!("Couldn't install stable release: {message}")),
+                        None => status_for_failed.set_text("Couldn't install stable release"),
+                    }
+                    progress_for_failed.add_css_class("error");
+                    button_for_failed.set_label("Check for stable release");
+                    button_for_failed.set_sensitive(true);
+                    checking_for_failed.set(false);
+                    // Leave the button re-checkable rather than stuck on a
+                    // stale "Return to stable" label with nothing pending.
+                    *pending_download_for_failed.borrow_mut() = None;
+                },
+            );
+        } else {
+            clicked_check();
+        }
+    });
+
+    row
 }
 
 /// Relaunches the (just-updated) executable and quits the current instance.
@@ -1062,64 +1315,62 @@ pub(super) fn show_update_dialog(
             download_url: download_url.clone(),
             version: version.clone(),
         });
-        let progress = progress.clone();
-        let status = status.clone();
-        let action = button.clone();
-        let installed = installed.clone();
-        glib::timeout_add_local(Duration::from_millis(100), move || {
-            loop {
-                match receiver.try_recv() {
-                    Ok(UpdateInstall::Downloading { downloaded, total }) => {
-                        if let Some(total) = total.filter(|total| *total > 0) {
-                            let fraction = (downloaded as f64 / total as f64).clamp(0.0, 1.0);
-                            progress.set_fraction(fraction);
-                            status.set_text(&format!(
-                                "Downloading… {:.0}%  ({:.1} of {:.1} MB)",
-                                fraction * 100.0,
-                                downloaded as f64 / 1_048_576.0,
-                                total as f64 / 1_048_576.0,
-                            ));
-                        } else {
-                            progress.pulse();
-                            status.set_text(&format!(
-                                "Downloading… {:.1} MB",
-                                downloaded as f64 / 1_048_576.0
-                            ));
-                        }
-                    }
-                    Ok(UpdateInstall::Verifying) => {
-                        status.set_text("Verifying update…");
-                    }
-                    Ok(UpdateInstall::Installing) => {
-                        progress.set_fraction(1.0);
-                        status.set_text("Installing update…");
-                    }
-                    Ok(UpdateInstall::Installed) => {
-                        progress.set_fraction(1.0);
-                        status.set_text("Update installed — restart to apply");
-                        action.set_label("Restart now");
-                        action.add_css_class("suggested-action");
-                        action.set_sensitive(true);
-                        installed.set(true);
-                        return glib::ControlFlow::Break;
-                    }
-                    Ok(UpdateInstall::Failed(message)) => {
-                        status.set_text(&format!("Couldn’t install update: {message}"));
-                        progress.add_css_class("error");
-                        action.set_label("Close");
-                        action.set_sensitive(true);
-                        return glib::ControlFlow::Break;
-                    }
-                    Err(TryRecvError::Empty) => return glib::ControlFlow::Continue,
-                    Err(TryRecvError::Disconnected) => {
-                        status.set_text("Couldn’t install update");
-                        action.set_label("Close");
-                        action.set_sensitive(true);
-                        return glib::ControlFlow::Break;
+        let progress_for_progress = progress.clone();
+        let status_for_progress = status.clone();
+        let progress_for_installed = progress.clone();
+        let status_for_installed = status.clone();
+        let action_for_installed = button.clone();
+        let installed_for_installed = installed.clone();
+        let progress_for_failed = progress.clone();
+        let status_for_failed = status.clone();
+        let action_for_failed = button.clone();
+        drive_install(
+            receiver,
+            move |event| match event {
+                InstallProgress::Downloading { downloaded, total } => {
+                    if let Some(total) = total.filter(|total| *total > 0) {
+                        let fraction = (downloaded as f64 / total as f64).clamp(0.0, 1.0);
+                        progress_for_progress.set_fraction(fraction);
+                        status_for_progress.set_text(&format!(
+                            "Downloading… {:.0}%  ({:.1} of {:.1} MB)",
+                            fraction * 100.0,
+                            downloaded as f64 / 1_048_576.0,
+                            total as f64 / 1_048_576.0,
+                        ));
+                    } else {
+                        progress_for_progress.pulse();
+                        status_for_progress.set_text(&format!(
+                            "Downloading… {:.1} MB",
+                            downloaded as f64 / 1_048_576.0
+                        ));
                     }
                 }
-            }
-        });
+                InstallProgress::Verifying => status_for_progress.set_text("Verifying update…"),
+                InstallProgress::Installing => {
+                    progress_for_progress.set_fraction(1.0);
+                    status_for_progress.set_text("Installing update…");
+                }
+            },
+            move || {
+                progress_for_installed.set_fraction(1.0);
+                status_for_installed.set_text("Update installed — restart to apply");
+                action_for_installed.set_label("Restart now");
+                action_for_installed.add_css_class("suggested-action");
+                action_for_installed.set_sensitive(true);
+                installed_for_installed.set(true);
+            },
+            move |message| {
+                match message {
+                    Some(message) => {
+                        status_for_failed.set_text(&format!("Couldn’t install update: {message}"));
+                        progress_for_failed.add_css_class("error");
+                    }
+                    None => status_for_failed.set_text("Couldn’t install update"),
+                }
+                action_for_failed.set_label("Close");
+                action_for_failed.set_sensitive(true);
+            },
+        );
     });
 }
 

@@ -361,17 +361,6 @@ pub fn best_update<'a>(
 /// stable release older than what they currently have installed. This is
 /// why `rollback_target` cannot reuse [`best_update`], which deliberately
 /// refuses to go backwards.
-// See the `cfg_attr` note on `Channel::Preview` above: this module's own
-// tests call it directly, so the `expect` only applies outside test builds.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "wired into update_check::select_rollback (Task 4), but nothing in \
-                  production calls check_rollback_target yet: Task 8's rollback UI is what \
-                  does that"
-    )
-)]
 pub fn rollback_target(releases: &[ReleaseSummary]) -> Option<&ReleaseSummary> {
     releases
         .iter()

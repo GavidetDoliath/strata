@@ -29,11 +29,5 @@ pub(crate) use update_check::{
     ReleaseMetadata, ReleaseNoteBlock, ReleaseNotes, UpdateCheck, check_for_updates,
     fetch_release_notes,
 };
-#[expect(
-    unused_imports,
-    reason = "RollbackCheck and check_rollback_target are consumed by update_check's own \
-              tests and are ready for a caller, but nothing outside services calls \
-              check_rollback_target yet: Task 8's rollback UI is what does that"
-)]
 pub(crate) use update_check::{RollbackCheck, check_rollback_target};
 pub(crate) use update_install::{InstallRequest, UpdateInstall, install_update};
