@@ -677,6 +677,20 @@ fn load_current_release_notes(card: &ReleaseNotesCard) {
     });
 }
 
+/// Whether a check's result -- issued under `result_generation` -- has been
+/// superseded by a newer check, whose generation is `current_generation`.
+///
+/// A toggle mid-check must start a fresh check rather than being silently
+/// dropped (see `run_check`'s doc comment), which means an older check's
+/// result can still land after a newer one has already started or even
+/// finished. Applying that stale result regardless is exactly how a Preview
+/// fetch in flight when the user flips back to Stable could still offer an
+/// RC to a Stable user: the result carries no channel of its own, so
+/// nothing but generation order distinguishes it from a current one.
+fn is_stale_check(result_generation: u64, current_generation: u64) -> bool {
+    result_generation != current_generation
+}
+
 fn update_check_row(
     manager: Rc<ThemeManager>,
     update_notice: UpdateNoticeHandler,
@@ -724,9 +738,18 @@ fn update_check_row(
     let pending_download = Rc::new(RefCell::new(None::<InstallRequest>));
     // Set once an install finishes, so the next click restarts instead of re-checking.
     let installed = Rc::new(Cell::new(false));
+    // The generation of the most recently started check. Each call to
+    // `run_check` captures the next value and compares against this when its
+    // result arrives; a mismatch means a newer check (e.g. from a channel
+    // toggle mid-flight) has since superseded it. Without this, a Preview
+    // fetch still in flight when the user flips back to Stable could land
+    // after the flip and offer an RC to a Stable user -- exactly the bug
+    // `is_stale_check` exists to prevent. See its doc comment.
+    let generation = Rc::new(Cell::new(0_u64));
 
     let run_check: Rc<dyn Fn()> = Rc::new({
         let checking = checking.clone();
+        let generation = generation.clone();
         let status = status.clone();
         let button = button.clone();
         let update_notice = update_notice.clone();
@@ -736,9 +759,14 @@ fn update_check_row(
         let available_notes = available_notes.clone();
         let manager = manager.clone();
         move || {
-            if checking.replace(true) {
-                return;
-            }
+            // Always start a fresh check rather than dropping it: a channel
+            // toggle must never be silently ignored just because a previous
+            // check (for the old channel) is still in flight. The stale
+            // check's own result is discarded below instead, once its
+            // generation no longer matches.
+            let my_generation = generation.get().saturating_add(1);
+            generation.set(my_generation);
+            checking.set(true);
             *pending_download.borrow_mut() = None;
             installed.set(false);
             button.set_label("Check now");
@@ -748,6 +776,11 @@ fn update_check_row(
             status.set_text("Checking for updates…");
             available_notes.container.set_visible(false);
             available_notes.fallback.set_visible(false);
+            // Clear any previously offered release immediately, not only once
+            // this check's own result lands: otherwise the sidebar keeps
+            // showing a (possibly prerelease) offer from before the channel
+            // was switched for the whole duration of this check.
+            update_notice(None);
             button.set_sensitive(false);
             // Read the channel now, not once when the row was built: a
             // mid-session channel toggle must be reflected by the very next
@@ -757,12 +790,20 @@ fn update_check_row(
                 crate::build_info::installed_version(),
             );
             let checking = checking.clone();
+            let generation = generation.clone();
             let status = status.clone();
             let button = button.clone();
             let update_notice = update_notice.clone();
             let pending_download = pending_download.clone();
             let available_notes = available_notes.clone();
             glib::timeout_add_local(Duration::from_millis(100), move || {
+                if is_stale_check(my_generation, generation.get()) {
+                    // A newer check has since started; that one owns
+                    // `checking`, `status`, and every other piece of shared
+                    // state this closure would otherwise touch. Stop polling
+                    // without applying this result.
+                    return glib::ControlFlow::Break;
+                }
                 match receiver.try_recv() {
                     Ok(result) => {
                         status.set_markup(&update_check_message(&result));

@@ -4,9 +4,25 @@ use crate::services::{BuildKind, Channel, ReleaseMetadata, UpdateCheck, Version}
 
 use super::{
     COMPACT_NAVIGATION_BREAKPOINT, DIALOG_HEIGHT, DIALOG_MARGIN, DIALOG_WIDTH, channel_copy,
-    installed_version_status, responsive_dialog_size, shows_available_release_notes,
-    theme_background_is_light, theme_name_matches, uses_compact_navigation,
+    installed_version_status, is_stale_check, responsive_dialog_size,
+    shows_available_release_notes, theme_background_is_light, theme_name_matches,
+    uses_compact_navigation,
 };
+
+#[test]
+fn a_checks_result_is_current_only_for_the_generation_it_was_issued_under() {
+    assert!(!is_stale_check(1, 1));
+    assert!(!is_stale_check(0, 0));
+}
+
+#[test]
+fn a_checks_result_is_stale_once_a_newer_check_has_started() {
+    // The scenario Important 1 fixes: a check issued as generation 1 is
+    // still in flight when a channel toggle starts generation 2. Generation
+    // 1's eventual result must never be applied.
+    assert!(is_stale_check(1, 2));
+    assert!(is_stale_check(2, 1));
+}
 
 #[test]
 fn settings_dialog_keeps_its_preferred_size_when_space_allows() {
