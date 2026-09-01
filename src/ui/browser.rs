@@ -4170,6 +4170,7 @@ impl ViewState {
                 })
                 .unwrap_or_default();
             size.set_label(&size_text);
+            size.set_visible(!size_text.is_empty());
         });
         factory.connect_unbind(|_, item| super::thumbnail::cancel_list_item_thumbnails(item));
 
