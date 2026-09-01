@@ -17,36 +17,11 @@ use std::{cmp::Ordering, fmt};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Channel {
     Stable,
-    // `cfg_attr(not(test), ...)`: this variant is genuinely dead in a
-    // production build, but every test binary compiled with `--cfg test`
-    // constructs it directly (this module's and `update_check`'s own
-    // fixtures), which makes a plain `#[expect(dead_code)]` here an
-    // unfulfilled expectation under `cargo test`/`clippy --all-targets`.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "never constructed in production yet: Task 4 (update_check) can now \
-                      select on this variant, but nothing constructs it until Task 7's \
-                      channel-selector UI lets a user opt in"
-        )
-    )]
     Preview,
 }
 
 impl Channel {
     /// The persisted/config-file representation of this channel.
-    // See the `cfg_attr` note on `Channel::Preview` above: this is exercised
-    // by this module's own tests, so the `expect` only applies outside test
-    // builds.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "no caller yet: Task 6's preference store is what will persist a \
-                      Channel, which is what calls this"
-        )
-    )]
     pub fn as_str(self) -> &'static str {
         match self {
             Channel::Stable => "stable",
@@ -59,14 +34,6 @@ impl Channel {
     ///
     /// This must fail closed: a corrupted or hand-edited config value must
     /// never silently opt a user into prereleases.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "no caller yet: Task 6's preference store is what will read a \
-                      persisted Channel back, which is what calls this"
-        )
-    )]
     pub fn parse(value: &str) -> Channel {
         match value {
             "preview" => Channel::Preview,

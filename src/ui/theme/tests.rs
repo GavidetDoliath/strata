@@ -7,7 +7,10 @@ use super::{
     merge_builtin_and_custom_themes, slugify, sort_preferences, title_case_slug,
     tokens_from_quattro, validate_tokens,
 };
-use crate::model::{SortDirection, SortKey, ViewPreferences};
+use crate::{
+    model::{SortDirection, SortKey, ViewPreferences},
+    services::Channel,
+};
 
 #[test]
 fn bundled_catalog_is_valid_unique_and_alphabetical() {
@@ -233,4 +236,56 @@ single_click_previews = false
     .expect("preferences should be valid");
 
     assert!(!preferences.single_click_previews);
+}
+
+#[test]
+fn release_channel_defaults_to_stable() {
+    let preferences = Preferences::default();
+    assert_eq!(preferences.release_channel, "stable");
+    assert_eq!(
+        Channel::parse(&preferences.release_channel),
+        Channel::Stable
+    );
+}
+
+#[test]
+fn preview_release_channel_round_trips_through_toml() {
+    let preferences = Preferences {
+        release_channel: "preview".to_owned(),
+        ..Preferences::default()
+    };
+    let serialized = toml::to_string(&preferences).expect("preferences should serialize");
+    let restored: Preferences =
+        toml::from_str(&serialized).expect("preferences should deserialize");
+    assert_eq!(restored.release_channel, "preview");
+    assert_eq!(Channel::parse(&restored.release_channel), Channel::Preview);
+}
+
+#[test]
+fn unknown_release_channel_value_parses_to_stable() {
+    let preferences = Preferences {
+        release_channel: "nightly-experiment".to_owned(),
+        ..Preferences::default()
+    };
+    assert_eq!(
+        Channel::parse(&preferences.release_channel),
+        Channel::Stable
+    );
+}
+
+#[test]
+fn legacy_preferences_without_release_channel_default_to_stable() {
+    let preferences: Preferences = toml::from_str(
+        r#"
+mode = "theme"
+theme = "azure-glow"
+"#,
+    )
+    .expect("legacy preferences without release_channel should remain valid");
+
+    assert_eq!(preferences.release_channel, "stable");
+    assert_eq!(
+        Channel::parse(&preferences.release_channel),
+        Channel::Stable
+    );
 }
