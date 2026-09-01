@@ -34,6 +34,7 @@ Strata combines spatial Miller-column navigation with familiar Grid and Explorer
   - [Follow Omarchy Quattro](#follow-omarchy-quattro)
   - [Bundled themes](#bundled-themes)
   - [Custom themes](#custom-themes)
+- [Release channels](#release-channels)
 - [Under the hood](#under-the-hood)
 - [Technical specifications](#technical-specifications)
 - [Development and documentation](#development-and-documentation)
@@ -245,6 +246,16 @@ Select **Add a theme**, enter a name, and choose the semantic colors for the bac
 
 Custom themes are stored as shareable TOML files in `~/.config/strata/themes/`. See [Themes](docs/themes.md) for the schema, file location, and Omarchy color mapping.
 
+## Release channels
+
+Strata defaults to the **Stable** channel: only final tagged releases are ever offered, and a Stable install never receives, sees, or is notified about a prerelease.
+
+To try upcoming changes early, turn on **Nightly / preview builds** in **Settings → Updates**. A preview install is then offered whichever build is newest — a release candidate, or an ordinary final release once one ships for that line — and the update dialog and release notes always visibly label a prerelease so it is never mistaken for a stable build.
+
+Turning the switch back off stops offering prereleases from that point on; it does not touch a preview build already installed. To replace one, use **Return to stable** on the same page. It appears whenever the running build itself is not stable, independent of the switch, and installs the newest stable release while preserving your preferences and data.
+
+See [Releasing](docs/releasing.md) for the tag grammar these channels rely on and, for maintainers, how a release candidate is cut and promoted.
+
 ## Under the hood
 
 ### Why search stays fast
@@ -294,6 +305,7 @@ Start with [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request. Dee
 - [Performance baseline](docs/performance-baseline.md)
 - [Themes and Omarchy integration](docs/themes.md)
 - [Unsafe code policy](docs/unsafe-code.md)
+- [Releasing](docs/releasing.md)
 
 ## Contributors
 
