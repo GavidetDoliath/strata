@@ -264,10 +264,11 @@ pub fn present_location(application: &gtk::Application, location: Option<PathBuf
     let available_update = Rc::new(RefCell::new(
         None::<(crate::services::ReleaseMetadata, String)>,
     ));
-    // Shared across the settings page's update/rollback rows and this
-    // dialog, so at most one install ever runs at a time -- see
-    // `settings::InstallGuard`.
-    let install_guard: super::settings::InstallGuard = Rc::new(Cell::new(false));
+    // Process-wide, not per-window: shared across the settings page's
+    // update/rollback rows, this dialog, and every other open window, so at
+    // most one install ever runs at a time -- see
+    // `settings::install_guard`.
+    let install_guard = super::settings::install_guard();
     let available_for_click = available_update.clone();
     let update_parent = window.clone().upcast::<gtk::Window>();
     let install_guard_for_dialog = install_guard.clone();

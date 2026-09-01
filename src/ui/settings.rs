@@ -40,6 +40,35 @@ pub(super) type UpdateNoticeHandler = Rc<dyn Fn(Option<(ReleaseMetadata, String)
 /// `update_install`'s staging paths. See [`start_install`].
 pub(super) type InstallGuard = Rc<Cell<bool>>;
 
+thread_local! {
+    static INSTALL_GUARD: InstallGuard = Rc::new(Cell::new(false));
+}
+
+/// The one [`InstallGuard`] for this process.
+///
+/// Every install writes the *same* target -- the running executable -- so
+/// the guard has to span every window, not just the three drivers within
+/// one. A per-window guard let an update started in one window and a
+/// rollback started in another replace that executable concurrently: the
+/// last write won, so a rollback could report success and persist
+/// [`Channel::Stable`] while a preview binary was in fact the one left
+/// installed.
+///
+/// A `thread_local` `Rc` (rather than a `Mutex`) is the whole story here
+/// because every window is built on the single GTK main thread, from
+/// `connect_activate`; this mirrors [`ThemeManager::shared`]. It is
+/// deliberately never released: it is one `bool`, and the guard's
+/// correctness should not depend on some window or in-flight install
+/// happening to still hold a strong reference.
+///
+/// This bounds races to *this* process. A second `strata` process can
+/// still install over the same executable, but `update_install` stages
+/// into a unique path and lands it with a single atomic rename, so that
+/// case degrades to last-writer-wins rather than a corrupted binary.
+pub(super) fn install_guard() -> InstallGuard {
+    INSTALL_GUARD.with(Rc::clone)
+}
+
 const DIALOG_WIDTH: i32 = 920;
 const DIALOG_HEIGHT: i32 = 680;
 const DIALOG_MARGIN: i32 = 24;
@@ -667,6 +696,35 @@ fn is_stale_check(result_generation: u64, current_generation: u64) -> bool {
     result_generation != current_generation
 }
 
+/// An update that a completed check offered and that the next click will
+/// install, held with the [`BuildKind`] it was offered as.
+///
+/// The kind is what lets the click re-test the offer against the channel
+/// preference in force *then* rather than when the check ran -- see
+/// [`offer_still_eligible`]. It is kept here, beside the request, rather
+/// than on [`InstallRequest`], which deliberately carries nothing but the
+/// URL the installer actually uses.
+struct PendingInstall {
+    kind: BuildKind,
+    request: InstallRequest,
+}
+
+/// Whether an offer for a `kind` build may still be installed by a user now
+/// on `channel`.
+///
+/// `is_stale_check` only covers a check whose *result* has not landed yet,
+/// and only within the one row that started it. This covers the other half:
+/// an offer that already landed and is sitting in a window's "Install
+/// update" button or an open update dialog. The channel preference is
+/// process-wide ([`ThemeManager::shared`]), so switching back to Stable in
+/// one window leaves every other window holding a cached RC offer it would
+/// otherwise happily install. Re-testing at the moment of the click is what
+/// makes the preference authoritative regardless of how many views cached
+/// an offer under the old one.
+fn offer_still_eligible(channel: Channel, kind: BuildKind) -> bool {
+    channel == Channel::Preview || kind == BuildKind::Stable
+}
+
 fn update_check_row(
     manager: Rc<ThemeManager>,
     update_notice: UpdateNoticeHandler,
@@ -711,7 +769,7 @@ fn update_check_row(
     let checking = Rc::new(Cell::new(false));
     // Set once a check finds an update this platform can install; consumed by the
     // button's next click instead of re-running a check.
-    let pending_download = Rc::new(RefCell::new(None::<InstallRequest>));
+    let pending_download = Rc::new(RefCell::new(None::<PendingInstall>));
     // Set once an install finishes, so the next click restarts instead of re-checking.
     let installed = Rc::new(Cell::new(false));
     // The generation of the most recently started check. Each call to
@@ -801,8 +859,11 @@ fn update_check_row(
                                 download_url,
                             } => {
                                 show_release_notes(&available_notes, release);
-                                *pending_download.borrow_mut() = Some(InstallRequest {
-                                    download_url: download_url.clone(),
+                                *pending_download.borrow_mut() = Some(PendingInstall {
+                                    kind: release.kind,
+                                    request: InstallRequest {
+                                        download_url: download_url.clone(),
+                                    },
                                 });
                                 button.set_label("Install update");
                             }
@@ -833,7 +894,21 @@ fn update_check_row(
             restart_application(button);
             return;
         }
-        if let Some(request) = pending_download.borrow_mut().take() {
+        if let Some(pending) = pending_download.borrow_mut().take() {
+            if !offer_still_eligible(manager.release_channel(), pending.kind) {
+                // The channel was switched back to Stable -- possibly from
+                // another window, which this row never hears about -- after
+                // this offer was cached. Drop it and re-check rather than
+                // installing a prerelease the user has since opted out of;
+                // `clicked_check` clears the sidebar notice and relabels the
+                // button on its way.
+                clicked_check();
+                return;
+            }
+            let PendingInstall {
+                kind: offered_kind,
+                request,
+            } = pending;
             if checking.replace(true) {
                 return;
             }
@@ -887,7 +962,10 @@ fn update_check_row(
                 button.set_label("Install update");
                 button.set_sensitive(true);
                 checking.set(false);
-                *pending_download.borrow_mut() = Some(request);
+                *pending_download.borrow_mut() = Some(PendingInstall {
+                    kind: offered_kind,
+                    request,
+                });
             }
         } else {
             clicked_check();
@@ -1386,6 +1464,10 @@ pub(super) fn show_update_dialog(
     layer.add_controller(escape);
 
     let installed = Rc::new(Cell::new(false));
+    // Set when the offer this dialog was opened with is no longer eligible on
+    // the current channel, which turns the action button into a plain Close.
+    let withdrawn = Rc::new(Cell::new(false));
+    let offered_kind = release.kind;
     let action_layer = layer.clone();
     let action_overlay = window_overlay.clone();
     let action_root = blurred_root.clone();
@@ -1395,6 +1477,24 @@ pub(super) fn show_update_dialog(
         if installed.get() {
             restart(application.as_ref());
             button.set_sensitive(false);
+            return;
+        }
+        if withdrawn.get() {
+            dismiss_modal_layer(&action_layer, &action_overlay, action_root.as_ref());
+            button.set_sensitive(false);
+            return;
+        }
+        // Read the channel at the click, not when the dialog was opened: this
+        // dialog is driven by the sidebar notice, whose cached offer survives
+        // a channel switch made anywhere in the process -- including in
+        // another window. `withdrawn` rather than `started` so Cancel and
+        // Escape keep dismissing normally.
+        if !offer_still_eligible(ThemeManager::shared().release_channel(), offered_kind) {
+            withdrawn.set(true);
+            status.set_text(
+                "This build is no longer offered on your update channel — check for updates again.",
+            );
+            button.set_label("Close");
             return;
         }
         if started.replace(true) {

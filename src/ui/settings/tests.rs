@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use crate::services::{BuildKind, ReleaseMetadata, UpdateCheck, Version};
+use std::rc::Rc;
+
+use crate::services::{BuildKind, Channel, ReleaseMetadata, UpdateCheck, Version};
 
 use super::{
     COMPACT_NAVIGATION_BREAKPOINT, DIALOG_HEIGHT, DIALOG_MARGIN, DIALOG_WIDTH,
-    PREVIEW_CHANNEL_DESCRIPTION, PREVIEW_CHANNEL_TITLE, installed_version_status, is_stale_check,
-    responsive_dialog_size, shows_available_release_notes, theme_background_is_light,
-    theme_name_matches, uses_compact_navigation,
+    PREVIEW_CHANNEL_DESCRIPTION, PREVIEW_CHANNEL_TITLE, install_guard, installed_version_status,
+    is_stale_check, offer_still_eligible, responsive_dialog_size, shows_available_release_notes,
+    theme_background_is_light, theme_name_matches, uses_compact_navigation,
 };
 
 #[test]
@@ -118,4 +120,38 @@ fn installed_version_status_names_the_build_kind_for_a_prerelease() {
         installed_version_status(&version, BuildKind::Rc),
         "Version 0.6.0-rc.1 · Release candidate"
     );
+}
+
+#[test]
+fn a_cached_prerelease_offer_stops_being_installable_once_the_channel_is_stable() {
+    // The cross-window case: a window cached an RC offer while on Preview,
+    // another window switched back to Stable, and the cached offer's install
+    // button must refuse it.
+    assert!(!offer_still_eligible(Channel::Stable, BuildKind::Rc));
+    assert!(!offer_still_eligible(Channel::Stable, BuildKind::Nightly));
+}
+
+#[test]
+fn a_cached_offer_stays_installable_when_the_channel_still_allows_it() {
+    assert!(offer_still_eligible(Channel::Stable, BuildKind::Stable));
+    assert!(offer_still_eligible(Channel::Preview, BuildKind::Stable));
+    assert!(offer_still_eligible(Channel::Preview, BuildKind::Rc));
+    assert!(offer_still_eligible(Channel::Preview, BuildKind::Nightly));
+}
+
+#[test]
+fn every_window_installs_behind_one_process_wide_guard() {
+    // Two windows each ask for a guard the way `ui::window::present` does.
+    // Handing out two independent cells is what let an update in one window
+    // and a rollback in another replace the executable concurrently.
+    let first = install_guard();
+    let second = install_guard();
+    assert!(Rc::ptr_eq(&first, &second));
+
+    assert!(!first.replace(true));
+    assert!(
+        second.get(),
+        "an install started in one window must be visible in every other"
+    );
+    first.set(false);
 }
