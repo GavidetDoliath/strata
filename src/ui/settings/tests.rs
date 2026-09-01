@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use crate::services::{BuildKind, Channel, ReleaseMetadata, UpdateCheck, Version};
+use crate::services::{BuildKind, ReleaseMetadata, UpdateCheck, Version};
 
 use super::{
-    COMPACT_NAVIGATION_BREAKPOINT, DIALOG_HEIGHT, DIALOG_MARGIN, DIALOG_WIDTH, channel_copy,
-    installed_version_status, is_stale_check, responsive_dialog_size,
-    shows_available_release_notes, theme_background_is_light, theme_name_matches,
-    uses_compact_navigation,
+    COMPACT_NAVIGATION_BREAKPOINT, DIALOG_HEIGHT, DIALOG_MARGIN, DIALOG_WIDTH,
+    PREVIEW_CHANNEL_DESCRIPTION, PREVIEW_CHANNEL_TITLE, installed_version_status, is_stale_check,
+    responsive_dialog_size, shows_available_release_notes, theme_background_is_light,
+    theme_name_matches, uses_compact_navigation,
 };
 
 #[test]
@@ -91,17 +91,14 @@ fn available_notes_are_shown_only_for_a_newer_release() {
 }
 
 #[test]
-fn channel_copy_uses_the_issues_exact_language() {
+fn preview_channel_copy_names_what_the_switch_enables() {
+    // The switch enables preview builds, so the label must name preview builds
+    // and must not change with the switch state -- a label that flipped to
+    // "Stable" when off read as though the switch disabled stable releases.
+    assert_eq!(PREVIEW_CHANNEL_TITLE, "Nightly / preview builds");
     assert_eq!(
-        channel_copy(Channel::Stable),
-        ("Stable", "Final releases only.")
-    );
-    assert_eq!(
-        channel_copy(Channel::Preview),
-        (
-            "Nightly / preview",
-            "Preview builds, including release candidates. These may be unstable."
-        )
+        PREVIEW_CHANNEL_DESCRIPTION,
+        "Receive release candidates and nightly builds. These may be unstable."
     );
 }
 

@@ -431,48 +431,27 @@ fn updates_page(
 
 /// The title and description shown for a given [`Channel`], using the
 /// exact language issue #61 specifies for each option.
-fn channel_copy(channel: Channel) -> (&'static str, &'static str) {
-    match channel {
-        Channel::Stable => ("Stable", "Final releases only."),
-        Channel::Preview => (
-            "Nightly / preview",
-            "Preview builds, including release candidates. These may be unstable.",
-        ),
-    }
-}
+/// The release-channel row's copy. Static: the switch enables preview builds,
+/// exactly as every other [`settings_option`] row enables the thing it names.
+/// A label that changed with the switch state read as though the switch were
+/// disabling whatever it currently said.
+const PREVIEW_CHANNEL_TITLE: &str = "Nightly / preview builds";
+const PREVIEW_CHANNEL_DESCRIPTION: &str =
+    "Receive release candidates and nightly builds. These may be unstable.";
 
-/// The release-channel selector row: a single toggle between [`Channel::Stable`]
-/// and [`Channel::Preview`], matching the visual language of [`settings_option`]
-/// but with a title and description that switch with the selection instead of
-/// staying fixed.
+/// The release-channel selector row: one switch that opts into
+/// [`Channel::Preview`], built from [`settings_option`] so it is structurally
+/// identical to the rows beside it. Off means [`Channel::Stable`].
 ///
 /// Toggling immediately persists the choice and re-runs `run_check` so the
 /// issue's "opting in checks the preview feed straight away" requirement holds
 /// without waiting for the next automatic check.
 fn channel_option(manager: Rc<ThemeManager>, run_check: Rc<dyn Fn()>) -> gtk::Box {
-    let channel = manager.release_channel();
-    let (title_text, description_text) = channel_copy(channel);
-
-    let row = gtk::Box::new(gtk::Orientation::Horizontal, 16);
-    row.add_css_class("settings-option");
-    let copy = gtk::Box::new(gtk::Orientation::Vertical, 2);
-    copy.set_hexpand(true);
-    copy.set_valign(gtk::Align::Center);
-    let title = gtk::Label::new(Some(title_text));
-    title.set_xalign(0.0);
-    title.add_css_class("settings-option-title");
-    let description = gtk::Label::new(Some(description_text));
-    description.set_xalign(0.0);
-    description.set_wrap(true);
-    description.add_css_class("settings-option-description");
-    copy.append(&title);
-    copy.append(&description);
-    let toggle = gtk::Switch::builder()
-        .active(channel == Channel::Preview)
-        .valign(gtk::Align::Center)
-        .build();
-    row.append(&copy);
-    row.append(&toggle);
+    let (row, toggle) = settings_option(
+        PREVIEW_CHANNEL_TITLE,
+        PREVIEW_CHANNEL_DESCRIPTION,
+        manager.release_channel() == Channel::Preview,
+    );
 
     toggle.connect_active_notify(move |switch| {
         let channel = if switch.is_active() {
@@ -481,9 +460,6 @@ fn channel_option(manager: Rc<ThemeManager>, run_check: Rc<dyn Fn()>) -> gtk::Bo
             Channel::Stable
         };
         manager.set_release_channel(channel);
-        let (title_text, description_text) = channel_copy(channel);
-        title.set_text(title_text);
-        description.set_text(description_text);
         run_check();
     });
 
