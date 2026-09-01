@@ -215,11 +215,11 @@ fn stable_feed_prerelease_tag_with_false_flag_is_never_offered() {
 }
 
 /// Exercises `fetch_preview`'s exact filtering pipeline against a fixture
-/// list: a draft, an unparseable tag, a release with no asset for this
+/// list: a draft, an unparsable tag, a release with no asset for this
 /// architecture, and one valid newer release. Only the valid release may
 /// ever be offered.
 #[test]
-fn preview_feed_skips_drafts_unparseable_tags_and_assetless_releases() {
+fn preview_feed_skips_drafts_unparsable_tags_and_assetless_releases() {
     let draft_asset = matching_asset_json("0.7.0");
     let valid_asset = matching_asset_json("0.5.0");
     let responses = release_response_list(&format!(
@@ -235,7 +235,7 @@ fn preview_feed_skips_drafts_unparseable_tags_and_assetless_releases() {
     assert_eq!(
         summaries.len(),
         3,
-        "only the unparseable tag is dropped at conversion time"
+        "only the unparsable tag is dropped at conversion time"
     );
 
     let installed = version("0.1.0");
