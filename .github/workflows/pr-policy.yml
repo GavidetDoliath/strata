@@ -1,0 +1,77 @@
+name: Pull request policy
+
+on:
+  pull_request_target:
+    types: [opened, edited, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  policy:
+    name: Metadata policy
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+
+    steps:
+      - name: Validate pull request metadata
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            const errors = [];
+            const title = context.payload.pull_request.title;
+            const titlePattern = /^(feat|fix|docs|refactor|test|perf|build|ci|chore)(\([a-z0-9][a-z0-9._\/-]*\))?!?: [a-z0-9].+$/;
+
+            if (!titlePattern.test(title)) {
+              errors.push("The pull request title must use Conventional Commit format: <type>(optional-scope): <imperative description>");
+              core.error(`Invalid pull request title: ${title}`);
+            }
+
+            const commits = await github.paginate(github.rest.pulls.listCommits, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number,
+              per_page: 100,
+            });
+
+            const claudeName = /\bclaude(?:\s+(?:sonnet|opus|haiku))?\b/i;
+            const anthropicEmail = /@anthropic\.com$/i;
+            const coAuthor = /^\s*co-authored-by:.*(?:\bclaude\b|@anthropic\.com)/im;
+            const claudeMetadata = /^\s*claude-[a-z-]+\s*:/im;
+            const attributionFailures = [];
+
+            for (const commit of commits) {
+              const identities = [
+                ["author", commit.commit.author],
+                ["committer", commit.commit.committer],
+              ];
+
+              const reasons = [];
+              for (const [role, identity] of identities) {
+                if (claudeName.test(identity?.name ?? "") ||
+                    anthropicEmail.test(identity?.email ?? "")) {
+                  reasons.push(`${role} identity`);
+                }
+              }
+
+              const message = commit.commit.message;
+              if (coAuthor.test(message)) reasons.push("Co-authored-by trailer");
+              if (claudeMetadata.test(message)) reasons.push("Claude metadata");
+
+              if (reasons.length > 0) {
+                attributionFailures.push(`${commit.sha.slice(0, 7)}: ${reasons.join(", ")}`);
+              }
+            }
+
+            if (attributionFailures.length > 0) {
+              errors.push(`Claude attribution found in ${attributionFailures.length} commit(s)`);
+              core.summary
+                .addHeading("Claude attribution must be removed")
+                .addList(attributionFailures)
+                .addRaw("Rewrite the listed commits to remove Claude/Anthropic author or co-author identities and Claude-* metadata, then force-push the pull request branch.");
+            }
+
+            if (errors.length > 0) {
+              await core.summary.write();
+              core.setFailed(errors.join("; "));
+            }
