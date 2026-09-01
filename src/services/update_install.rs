@@ -14,21 +14,34 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum UpdateInstall {
     Downloading { downloaded: u64, total: Option<u64> },
+    Verifying,
     Installing,
     Installed,
     Failed(String),
 }
 
-/// Downloads, verifies, and installs `download_url` in place of the running executable.
-/// Runs off the GTK thread and reports the outcome once. Mirrors the manual install
-/// steps in the README: fetch the release archive, check its published `sha256`, and
-/// extract the `strata` binary over the current install.
-pub fn install_update(download_url: String) -> Receiver<UpdateInstall> {
+/// What to install: the archive to download and the version it is expected
+/// to contain.
+///
+/// The caller needs `version` to report precisely which build was
+/// installed, and the rollback caller needs it to flip the persisted
+/// channel afterwards once the install succeeds.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InstallRequest {
+    pub download_url: String,
+    pub version: String,
+}
+
+/// Downloads, verifies, and installs `request`'s archive in place of the running
+/// executable. Runs off the GTK thread and reports the outcome once. Mirrors the
+/// manual install steps in the README: fetch the release archive, check its
+/// published `sha256`, and extract the `strata` binary over the current install.
+pub fn install_update(request: InstallRequest) -> Receiver<UpdateInstall> {
     let (sender, receiver) = mpsc::channel();
     let spawned = std::thread::Builder::new()
         .name("strata-update-install".into())
         .spawn(move || {
-            let outcome = match perform_install(&download_url, &sender) {
+            let outcome = match perform_install(&request.download_url, &sender) {
                 Ok(()) => UpdateInstall::Installed,
                 Err(message) => UpdateInstall::Failed(message),
             };
@@ -64,8 +77,9 @@ fn try_install(
 ) -> Result<(), String> {
     let archive_path = workdir.join("strata.tar.gz");
     download_to_file(download_url, &archive_path, progress)?;
-    let _sent = progress.send(UpdateInstall::Installing);
+    let _sent = progress.send(UpdateInstall::Verifying);
     verify_checksum(download_url, &archive_path)?;
+    let _sent = progress.send(UpdateInstall::Installing);
 
     let extract_dir = workdir.join("extracted");
     fs::create_dir_all(&extract_dir).map_err(|error| error.to_string())?;
@@ -75,9 +89,12 @@ fn try_install(
         .arg("-C")
         .arg(&extract_dir))?;
 
-    let binary_path = find_binary(&extract_dir)?;
+    let binary_paths = find_binaries(&extract_dir, &["strata"])?;
+    let binary_path = binary_paths
+        .first()
+        .ok_or_else(|| "Could not find the strata binary in the downloaded archive".to_owned())?;
     let staged = exe_dir.join(format!(".strata-update-{}.tmp", std::process::id()));
-    fs::copy(&binary_path, &staged)
+    fs::copy(binary_path, &staged)
         .map_err(|error| format!("Could not stage the new binary: {error}"))?;
     set_executable(&staged)?;
     fs::rename(&staged, current_exe)
@@ -156,15 +173,30 @@ fn first_hash_token(text: &str) -> Option<String> {
     text.split_whitespace().next().map(str::to_ascii_lowercase)
 }
 
-fn find_binary(extract_dir: &Path) -> Result<PathBuf, String> {
-    let entries = fs::read_dir(extract_dir).map_err(|error| error.to_string())?;
-    for entry in entries.flatten() {
-        let candidate = entry.path().join("strata");
-        if candidate.is_file() {
-            return Ok(candidate);
-        }
-    }
-    Err("Could not find the strata binary in the downloaded archive".to_owned())
+/// Locates each of `names` as a nested file within `extract_dir` (searching one
+/// level down, matching the layout of the release archives). Returns their paths
+/// in the same order as `names`, or an error naming the first one not found.
+///
+/// This is the seam issue #59 would need if it ever ships a second executable:
+/// today it is always called with a single name, and no caller performs a
+/// multi-file transactional install.
+fn find_binaries(extract_dir: &Path, names: &[&str]) -> Result<Vec<PathBuf>, String> {
+    let entries: Vec<_> = fs::read_dir(extract_dir)
+        .map_err(|error| error.to_string())?
+        .flatten()
+        .collect();
+    names
+        .iter()
+        .map(|name| {
+            entries
+                .iter()
+                .map(|entry| entry.path().join(name))
+                .find(|candidate| candidate.is_file())
+                .ok_or_else(|| {
+                    format!("Could not find the {name} binary in the downloaded archive")
+                })
+        })
+        .collect()
 }
 
 fn set_executable(path: &Path) -> Result<(), String> {

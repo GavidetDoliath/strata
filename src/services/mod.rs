@@ -36,4 +36,4 @@ pub(crate) use update_check::{
               check_rollback_target yet: Task 8's rollback UI is what does that"
 )]
 pub(crate) use update_check::{RollbackCheck, check_rollback_target};
-pub(crate) use update_install::{UpdateInstall, install_update};
+pub(crate) use update_install::{InstallRequest, UpdateInstall, install_update};

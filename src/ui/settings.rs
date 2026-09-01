@@ -12,7 +12,8 @@ use gtk::{gdk, glib, prelude::*, subclass::prelude::*};
 use crate::{
     assets::icons,
     services::{
-        self, Channel, ReleaseMetadata, ReleaseNoteBlock, ReleaseNotes, UpdateCheck, UpdateInstall,
+        self, Channel, InstallRequest, ReleaseMetadata, ReleaseNoteBlock, ReleaseNotes,
+        UpdateCheck, UpdateInstall,
     },
 };
 
@@ -614,7 +615,7 @@ fn update_check_row(
     let checking = Rc::new(Cell::new(false));
     // Set once a check finds an update this platform can install; consumed by the
     // button's next click instead of re-running a check.
-    let pending_download = Rc::new(RefCell::new(None::<String>));
+    let pending_download = Rc::new(RefCell::new(None::<InstallRequest>));
     // Set once an install finishes, so the next click restarts instead of re-checking.
     let installed = Rc::new(Cell::new(false));
 
@@ -673,7 +674,10 @@ fn update_check_row(
                                 download_url,
                             } => {
                                 show_release_notes(&available_notes, release);
-                                *pending_download.borrow_mut() = Some(download_url.clone());
+                                *pending_download.borrow_mut() = Some(InstallRequest {
+                                    download_url: download_url.clone(),
+                                    version: release.version.clone(),
+                                });
                                 button.set_label("Install update");
                             }
                             UpdateCheck::UpToDate | UpdateCheck::Failed(_) => {}
@@ -703,7 +707,7 @@ fn update_check_row(
             restart_application(button);
             return;
         }
-        if let Some(download_url) = pending_download.borrow_mut().take() {
+        if let Some(request) = pending_download.borrow_mut().take() {
             if checking.replace(true) {
                 return;
             }
@@ -712,7 +716,7 @@ fn update_check_row(
             progress.set_visible(true);
             progress.remove_css_class("error");
             button.set_sensitive(false);
-            let receiver = services::install_update(download_url);
+            let receiver = services::install_update(request);
             let checking = checking.clone();
             let status = status.clone();
             let button = button.clone();
@@ -737,9 +741,12 @@ fn update_check_row(
                                 ));
                             }
                         }
+                        Ok(UpdateInstall::Verifying) => {
+                            status.set_text("Verifying update…");
+                        }
                         Ok(UpdateInstall::Installing) => {
                             progress.set_fraction(1.0);
-                            status.set_text("Verifying and installing update…");
+                            status.set_text("Installing update…");
                         }
                         Ok(UpdateInstall::Installed) => {
                             status.set_text("Update installed — restart to apply");
@@ -931,6 +938,7 @@ pub(super) fn show_update_dialog(
     let action_root = blurred_root.clone();
     let application = parent.application();
     let action_close = close.clone();
+    let version = release.version.clone();
     action.connect_clicked(move |button| {
         if installed.get() {
             restart(application.as_ref());
@@ -948,7 +956,10 @@ pub(super) fn show_update_dialog(
         action_close.set_sensitive(false);
         progress.set_visible(true);
         status.set_text("Starting download…");
-        let receiver = services::install_update(download_url.clone());
+        let receiver = services::install_update(InstallRequest {
+            download_url: download_url.clone(),
+            version: version.clone(),
+        });
         let progress = progress.clone();
         let status = status.clone();
         let action = button.clone();
@@ -974,9 +985,12 @@ pub(super) fn show_update_dialog(
                             ));
                         }
                     }
+                    Ok(UpdateInstall::Verifying) => {
+                        status.set_text("Verifying update…");
+                    }
                     Ok(UpdateInstall::Installing) => {
                         progress.set_fraction(1.0);
-                        status.set_text("Download complete — verifying and installing…");
+                        status.set_text("Installing update…");
                     }
                     Ok(UpdateInstall::Installed) => {
                         progress.set_fraction(1.0);
