@@ -1491,6 +1491,10 @@ impl Browser {
                     take_focus: false,
                 });
             }
+            self.emit(BrowserEvent::FocusChanged {
+                depth,
+                position: selected,
+            });
         }
     }
 
