@@ -14,6 +14,7 @@ use crate::{
     adapters::{LocalFileSource, LocalOperationProvider, LocalPreviewProvider, location_for_file},
     app::{Browser, BrowserEvent},
     model::{EntryKind, FileEntry, Location, MetadataValue},
+    services::{BuildKind, ReleaseMetadata},
 };
 
 use super::{
@@ -275,7 +276,12 @@ pub fn present_location(application: &gtk::Application, location: Option<PathBuf
     let update_notice: super::settings::UpdateNoticeHandler = Rc::new(move |release| {
         if let Some((release, download_url)) = release {
             update_button.set_tooltip_text(Some(&format!("Install Strata v{}", release.version)));
-            update_label.set_text(&format!("v{} available", release.version));
+            update_label.set_text(&sidebar_update_label(&release));
+            if release.kind == BuildKind::Stable {
+                update_button.remove_css_class("preview");
+            } else {
+                update_button.add_css_class("preview");
+            }
             *available_for_notice.borrow_mut() = Some((release, download_url));
             update_area.set_visible(true);
         } else {
@@ -1494,6 +1500,22 @@ fn sidebar_button(icon: &str, name: &str) -> gtk::Button {
 
 fn navigate_to_gio_file(browser: &Rc<Browser>, file: &gio::File) {
     browser.navigate(location_for_file(file));
+}
+
+/// The sidebar update-notice pill's label text: `v{version} available` for a
+/// stable offer, or `v{version} ({label}) available` for a prerelease --
+/// e.g. `v0.5.0-rc.1 (Release candidate) available` -- so a preview build
+/// offer is never mistaken for an ordinary stable update at a glance.
+///
+/// No channel guard belongs here: `check_for_updates` is already
+/// channel-filtered upstream, so a Stable user's `release` can never carry
+/// a prerelease kind in the first place.
+fn sidebar_update_label(release: &ReleaseMetadata) -> String {
+    if release.kind == BuildKind::Stable {
+        format!("v{} available", release.version)
+    } else {
+        format!("v{} ({}) available", release.version, release.kind.label())
+    }
 }
 
 fn build_sidebar(view: BrowserView) -> SidebarView {

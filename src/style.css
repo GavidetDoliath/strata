@@ -1220,6 +1220,25 @@ switch:checked slider {
   font-weight: 650;
 }
 
+.sidebar-update.preview {
+  color: @theme_danger;
+}
+
+.sidebar-update.preview:hover {
+  background: alpha(@theme_danger, 0.16);
+  color: @theme_danger;
+}
+
+.sidebar-update.preview:active {
+  background: alpha(@theme_danger, 0.24);
+  color: @theme_danger;
+}
+
+.sidebar-update.preview .sidebar-update-dot,
+.sidebar-update.preview .sidebar-update-label {
+  color: @theme_danger;
+}
+
 .sidebar-row {
   background: transparent;
   border: none;
