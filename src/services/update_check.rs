@@ -8,7 +8,9 @@ use std::{
 use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use serde::Deserialize;
 
-use super::{BuildKind, Channel, ReleaseSummary, Version, best_update, rollback_target};
+use super::release_channel::{
+    BuildKind, Channel, ReleaseSummary, Version, best_update, rollback_target,
+};
 
 const API_ROOT: &str = "https://api.github.com/repos/lgse/strata/releases";
 const RELEASES_URL: &str = "https://github.com/lgse/strata/releases";

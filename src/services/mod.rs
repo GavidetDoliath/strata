@@ -21,9 +21,12 @@ pub use preview::{
     Preview, PreviewContent, PreviewEvent, PreviewProvider, PreviewRequest, PreviewRequestId,
 };
 pub(crate) use preview::{content_family, has_plain_text_extension};
-pub(crate) use release_channel::{
-    BuildKind, Channel, ReleaseSummary, Version, best_update, rollback_target,
-};
+// `best_update`, `rollback_target`, and `ReleaseSummary` are deliberately not
+// re-exported here: `rollback_target` is the never-downgrade bypass, and only
+// `update_check` (which imports them directly from `release_channel`) has any
+// business calling it. Widening this re-export would make that bypass
+// reachable from UI code.
+pub(crate) use release_channel::{BuildKind, Channel, Version};
 pub(crate) use search::{SearchEvent, SearchHandle, SearchItem, index_tree};
 pub(crate) use update_check::{
     ReleaseMetadata, ReleaseNoteBlock, ReleaseNotes, UpdateCheck, check_for_updates,

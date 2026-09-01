@@ -239,6 +239,13 @@ fn best_update_never_offers_a_downgrade() {
 }
 
 #[test]
+fn best_update_never_offers_a_downgrade_on_stable() {
+    let installed = parse("0.5.0");
+    let releases = [release("v0.4.0")];
+    assert!(best_update(Channel::Stable, &installed, &releases).is_none());
+}
+
+#[test]
 fn best_update_when_installed_equals_newest_is_none() {
     let installed = parse("0.5.0");
     let releases = [release("v0.5.0")];

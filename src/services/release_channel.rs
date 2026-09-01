@@ -103,13 +103,6 @@ struct Ordinal {
 pub struct Prerelease {
     kind: BuildKind,
     ordinal: Ordinal,
-    #[expect(
-        dead_code,
-        reason = "preserved so a later task (channel-selector or rollback UI) can display \
-                  the maintainer's exact published prerelease suffix instead of the \
-                  canonically reconstructed one Display produces; not yet read"
-    )]
-    raw: String,
 }
 
 /// A semver-correct, comparable representation of a release tag.
@@ -153,7 +146,7 @@ fn parse_core(value: &str) -> Option<(u64, u64, u64)> {
     Some((major, minor, patch))
 }
 
-fn parse_prerelease(raw: &str, suffix: &str) -> Option<Prerelease> {
+fn parse_prerelease(suffix: &str) -> Option<Prerelease> {
     let mut parts = suffix.split('.');
     match parts.next()? {
         "rc" => {
@@ -167,7 +160,6 @@ fn parse_prerelease(raw: &str, suffix: &str) -> Option<Prerelease> {
                     primary: n,
                     suffix: 0,
                 },
-                raw: raw.to_string(),
             })
         }
         "nightly" => {
@@ -189,7 +181,6 @@ fn parse_prerelease(raw: &str, suffix: &str) -> Option<Prerelease> {
                     primary: date,
                     suffix: suffix_n,
                 },
-                raw: raw.to_string(),
             })
         }
         _ => None,
@@ -210,7 +201,7 @@ impl Version {
         };
         let core = parse_core(core_str)?;
         let prerelease = match prerelease_str {
-            Some(suffix) => Some(parse_prerelease(tag, suffix)?),
+            Some(suffix) => Some(parse_prerelease(suffix)?),
             None => None,
         };
         Some(Version { core, prerelease })
@@ -362,11 +353,12 @@ pub fn best_update<'a>(
 /// why `rollback_target` cannot reuse [`best_update`], which deliberately
 /// refuses to go backwards.
 pub fn rollback_target(releases: &[ReleaseSummary]) -> Option<&ReleaseSummary> {
+    // `is_eligible(Stable, ..)` already asserts `version.prerelease.is_none()`
+    // (alongside GitHub's own `prerelease` flag), so no separate check is
+    // needed here.
     releases
         .iter()
-        .filter(|release| {
-            release.version.prerelease.is_none() && is_eligible(Channel::Stable, release)
-        })
+        .filter(|release| is_eligible(Channel::Stable, release))
         .max_by(|a, b| a.version.cmp(&b.version))
 }
 
