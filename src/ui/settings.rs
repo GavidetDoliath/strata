@@ -12,8 +12,8 @@ use gtk::{gdk, glib, prelude::*, subclass::prelude::*};
 use crate::{
     assets::icons,
     services::{
-        self, Channel, InstallRequest, ReleaseMetadata, ReleaseNoteBlock, ReleaseNotes,
-        UpdateCheck, UpdateInstall,
+        self, BuildKind, Channel, InstallRequest, ReleaseMetadata, ReleaseNoteBlock, ReleaseNotes,
+        UpdateCheck, UpdateInstall, Version,
     },
 };
 
@@ -359,6 +359,19 @@ fn general_page(browser: &BrowserView, manager: Rc<ThemeManager>) -> gtk::Widget
 fn updates_page(manager: Rc<ThemeManager>, update_notice: UpdateNoticeHandler) -> gtk::Widget {
     let preferences = page_content();
     append_heading(&preferences, "UPDATE PREFERENCES");
+
+    let available_notes = release_notes_card(
+        "Available release",
+        "Check for updates to see the latest release notes.",
+    );
+    let (update_row, run_check) = update_check_row(
+        manager.clone(),
+        update_notice.clone(),
+        available_notes.clone(),
+    );
+
+    preferences.append(&channel_option(manager.clone(), run_check.clone()));
+
     let auto_check_enabled = manager.checks_for_updates();
     let (auto_check_row, auto_check) = settings_option(
         "Automatically check for updates",
@@ -366,12 +379,6 @@ fn updates_page(manager: Rc<ThemeManager>, update_notice: UpdateNoticeHandler) -
         auto_check_enabled,
     );
     preferences.append(&auto_check_row);
-
-    let available_notes = release_notes_card(
-        "Available release",
-        "Check for updates to see the latest release notes.",
-    );
-    let (update_row, run_check) = update_check_row(update_notice.clone(), available_notes.clone());
     preferences.append(&update_row);
 
     append_heading(&preferences, "RELEASE NOTES");
@@ -401,6 +408,67 @@ fn updates_page(manager: Rc<ThemeManager>, update_notice: UpdateNoticeHandler) -
     }
 
     scrollable_page(&preferences, None)
+}
+
+/// The title and description shown for a given [`Channel`], using the
+/// exact language issue #61 specifies for each option.
+fn channel_copy(channel: Channel) -> (&'static str, &'static str) {
+    match channel {
+        Channel::Stable => ("Stable", "Final releases only."),
+        Channel::Preview => (
+            "Nightly / preview",
+            "Preview builds, including release candidates. These may be unstable.",
+        ),
+    }
+}
+
+/// The release-channel selector row: a single toggle between [`Channel::Stable`]
+/// and [`Channel::Preview`], matching the visual language of [`settings_option`]
+/// but with a title and description that switch with the selection instead of
+/// staying fixed.
+///
+/// Toggling immediately persists the choice and re-runs `run_check` so the
+/// issue's "opting in checks the preview feed straight away" requirement holds
+/// without waiting for the next automatic check.
+fn channel_option(manager: Rc<ThemeManager>, run_check: Rc<dyn Fn()>) -> gtk::Box {
+    let channel = manager.release_channel();
+    let (title_text, description_text) = channel_copy(channel);
+
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 16);
+    row.add_css_class("settings-option");
+    let copy = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    copy.set_hexpand(true);
+    copy.set_valign(gtk::Align::Center);
+    let title = gtk::Label::new(Some(title_text));
+    title.set_xalign(0.0);
+    title.add_css_class("settings-option-title");
+    let description = gtk::Label::new(Some(description_text));
+    description.set_xalign(0.0);
+    description.set_wrap(true);
+    description.add_css_class("settings-option-description");
+    copy.append(&title);
+    copy.append(&description);
+    let toggle = gtk::Switch::builder()
+        .active(channel == Channel::Preview)
+        .valign(gtk::Align::Center)
+        .build();
+    row.append(&copy);
+    row.append(&toggle);
+
+    toggle.connect_active_notify(move |switch| {
+        let channel = if switch.is_active() {
+            Channel::Preview
+        } else {
+            Channel::Stable
+        };
+        manager.set_release_channel(channel);
+        let (title_text, description_text) = channel_copy(channel);
+        title.set_text(title_text);
+        description.set_text(description_text);
+        run_check();
+    });
+
+    row
 }
 
 fn release_notes_label() -> gtk::Label {
@@ -481,6 +549,7 @@ fn set_release_note_blocks(notes: &gtk::Box, blocks: &[ReleaseNoteBlock]) {
 struct ReleaseNotesCard {
     container: gtk::Box,
     title: gtk::Label,
+    badge: gtk::Label,
     notes: gtk::Box,
     fallback: gtk::LinkButton,
 }
@@ -492,6 +561,11 @@ fn release_notes_card(title: &str, initial: &str) -> ReleaseNotesCard {
     title_label.add_css_class("release-notes-title");
     title_label.set_xalign(0.0);
     title_label.set_wrap(true);
+    let badge = gtk::Label::new(None);
+    badge.add_css_class("prerelease-badge");
+    badge.set_xalign(0.0);
+    badge.set_halign(gtk::Align::Start);
+    badge.set_visible(false);
     let notes = gtk::Box::new(gtk::Orientation::Vertical, 6);
     set_release_notes_message(&notes, initial);
     let fallback =
@@ -500,16 +574,21 @@ fn release_notes_card(title: &str, initial: &str) -> ReleaseNotesCard {
     fallback.set_halign(gtk::Align::Start);
     fallback.set_visible(false);
     container.append(&title_label);
+    container.append(&badge);
     container.append(&notes);
     container.append(&fallback);
     ReleaseNotesCard {
         container,
         title: title_label,
+        badge,
         notes,
         fallback,
     }
 }
 
+/// Shows `release`'s notes in `card`, including a visible prerelease badge
+/// above the notes whenever `release.kind` is not [`BuildKind::Stable`] --
+/// release notes and update surfaces must visibly label prerelease software.
 fn show_release_notes(card: &ReleaseNotesCard, release: &ReleaseMetadata) {
     card.container.set_visible(true);
     card.title.set_text(&format!(
@@ -522,6 +601,12 @@ fn show_release_notes(card: &ReleaseNotesCard, release: &ReleaseMetadata) {
             .trim(),
         release.version
     ));
+    if release.kind == BuildKind::Stable {
+        card.badge.set_visible(false);
+    } else {
+        card.badge.set_text(release.kind.label());
+        card.badge.set_visible(true);
+    }
     if release.notes.trim().is_empty() {
         set_release_notes_message(
             &card.notes,
@@ -574,6 +659,7 @@ fn load_current_release_notes(card: &ReleaseNotesCard) {
 }
 
 fn update_check_row(
+    manager: Rc<ThemeManager>,
     update_notice: UpdateNoticeHandler,
     available_notes: ReleaseNotesCard,
 ) -> (gtk::Box, Rc<dyn Fn()>) {
@@ -587,9 +673,9 @@ fn update_check_row(
     let title = gtk::Label::new(Some("Check for updates"));
     title.set_xalign(0.0);
     title.add_css_class("settings-option-title");
-    let status = gtk::Label::new(Some(&format!(
-        "Version {}",
-        crate::build_info::installed_version()
+    let status = gtk::Label::new(Some(&installed_version_status(
+        &crate::build_info::installed_version(),
+        crate::build_info::build_kind(),
     )));
     status.set_xalign(0.0);
     status.set_wrap(true);
@@ -628,6 +714,7 @@ fn update_check_row(
         let installed = installed.clone();
         let progress = progress.clone();
         let available_notes = available_notes.clone();
+        let manager = manager.clone();
         move || {
             if checking.replace(true) {
                 return;
@@ -642,8 +729,11 @@ fn update_check_row(
             available_notes.container.set_visible(false);
             available_notes.fallback.set_visible(false);
             button.set_sensitive(false);
+            // Read the channel now, not once when the row was built: a
+            // mid-session channel toggle must be reflected by the very next
+            // check, including this one if it was triggered by that toggle.
             let receiver = services::check_for_updates(
-                Channel::Stable,
+                manager.release_channel(),
                 crate::build_info::installed_version(),
             );
             let checking = checking.clone();
@@ -848,6 +938,18 @@ pub(super) fn show_update_dialog(
     );
     layout.content.add_css_class("update-dialog");
     layout.content.set_size_request(560, -1);
+    // A prerelease offer must be visibly labelled, and must let the user
+    // confirm exactly what they are about to install before doing so: which
+    // channel it is, its precise tag, the source commit, and when it was
+    // published.
+    if release.kind != BuildKind::Stable {
+        let badge = gtk::Label::new(Some(release.kind.label()));
+        badge.add_css_class("prerelease-badge");
+        badge.set_xalign(0.0);
+        badge.set_halign(gtk::Align::Start);
+        layout.body.append(&badge);
+        layout.body.append(&update_dialog_details(release));
+    }
     let notes_heading = gtk::Label::new(Some("What’s new"));
     notes_heading.add_css_class("release-notes-title");
     notes_heading.set_xalign(0.0);
@@ -1021,8 +1123,66 @@ pub(super) fn show_update_dialog(
     });
 }
 
+/// Renders `release`'s channel, tag, source commit, and publication date as
+/// a small identity block, for the dialog to show above the notes whenever
+/// it is offering a prerelease -- the issue requires the user be able to
+/// confirm exactly what they are about to install before doing so.
+fn update_dialog_details(release: &ReleaseMetadata) -> gtk::Box {
+    let details = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    details.add_css_class("update-dialog-details");
+    for (label, value) in [
+        ("Channel", release.kind.label().to_owned()),
+        ("Tag", release.tag.clone()),
+        (
+            "Commit",
+            release
+                .commit
+                .clone()
+                .unwrap_or_else(|| "Unknown".to_owned()),
+        ),
+        (
+            "Published",
+            release
+                .published_at
+                .clone()
+                .unwrap_or_else(|| "Unknown".to_owned()),
+        ),
+    ] {
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        row.add_css_class("update-dialog-detail-row");
+        let label_widget = gtk::Label::new(Some(label));
+        label_widget.add_css_class("update-dialog-detail-label");
+        label_widget.set_xalign(0.0);
+        label_widget.set_hexpand(true);
+        let value_widget = gtk::Label::new(Some(&value));
+        value_widget.add_css_class("update-dialog-detail-value");
+        value_widget.set_xalign(0.0);
+        value_widget.set_selectable(true);
+        value_widget.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+        if label == "Commit" {
+            value_widget.add_css_class("monospace");
+        }
+        row.append(&label_widget);
+        row.append(&value_widget);
+        details.append(&row);
+    }
+    details
+}
+
 fn shows_available_release_notes(result: &UpdateCheck) -> bool {
     matches!(result, UpdateCheck::Available { .. })
+}
+
+/// The installed build's identity, for the update row's idle status line:
+/// just the version for a stable build, or `Version {version} · {label}`
+/// when running a prerelease -- so a user on an RC or nightly always sees
+/// what they currently have installed, not just a bare version number.
+fn installed_version_status(version: &Version, kind: BuildKind) -> String {
+    if kind == BuildKind::Stable {
+        format!("Version {version}")
+    } else {
+        format!("Version {version} · {}", kind.label())
+    }
 }
 
 fn update_check_message(result: &UpdateCheck) -> String {

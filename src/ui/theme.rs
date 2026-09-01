@@ -227,20 +227,10 @@ impl ThemeManager {
         self.save_preferences();
     }
 
-    #[expect(
-        dead_code,
-        reason = "no caller yet: Task 7's channel-selector UI is what reads this to render \
-                  the current selection"
-    )]
     pub fn release_channel(&self) -> Channel {
         Channel::parse(&self.preferences.borrow().release_channel)
     }
 
-    #[expect(
-        dead_code,
-        reason = "no caller yet: Task 7's channel-selector UI is what calls this when the \
-                  user switches channels"
-    )]
     pub fn set_release_channel(&self, channel: Channel) {
         self.preferences.borrow_mut().release_channel = channel.as_str().to_owned();
         self.save_preferences();
