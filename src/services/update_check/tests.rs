@@ -102,7 +102,6 @@ fn release_metadata_tolerates_missing_publication_fields() {
     ));
     let summary = to_release_summary(&response).expect("tag should parse");
     assert!(summary.published_at.is_none());
-    assert!(summary.commit.is_none());
 }
 
 #[test]
@@ -110,7 +109,7 @@ fn release_metadata_carries_channel_identity_fields() {
     let asset = matching_asset_json("0.5.0-rc.1");
     let response = release_response(&format!(
         r#"{{"tag_name":"v0.5.0-rc.1","draft":false,"prerelease":true,
-        "published_at":"2026-08-01T00:00:00Z","target_commitish":"abc123","assets":[{asset}]}}"#
+        "published_at":"2026-08-01T00:00:00Z","target_commitish":"main","assets":[{asset}]}}"#
     ));
     let summary = to_release_summary(&response).expect("tag should parse");
     let metadata = release_metadata(&summary);
@@ -121,7 +120,10 @@ fn release_metadata_carries_channel_identity_fields() {
         metadata.published_at.as_deref(),
         Some("2026-08-01T00:00:00Z")
     );
-    assert_eq!(metadata.commit.as_deref(), Some("abc123"));
+    // `target_commitish` is never the commit: GitHub returns the default
+    // branch for a release published against an existing tag. The metadata
+    // leaves `commit` unresolved for `resolve_commit` to fill in.
+    assert!(metadata.commit.is_none());
     assert_eq!(
         metadata.url,
         "https://github.com/lgse/strata/releases/tag/v0.5.0-rc.1"
@@ -288,6 +290,29 @@ fn rollback_selects_the_newest_final_release_over_a_prerelease() {
         RollbackCheck::Available { release, .. } => assert_eq!(release.tag, "v0.4.0"),
         other => panic!("expected rollback to final 0.4.0, got {other:?}"),
     }
+}
+
+#[test]
+fn rollback_selects_the_lone_latest_release_the_stable_feed_returns() {
+    // The shape `fetch_rollback` now passes in: `/releases/latest` yields at
+    // most one release, never a page that a run of prereleases could push
+    // the last final release off.
+    let asset = matching_asset_json("0.4.0");
+    let responses = release_response_list(&format!(
+        r#"[{{"tag_name":"v0.4.0","draft":false,"prerelease":false,"assets":[{asset}]}}]"#
+    ));
+    let summaries: Vec<_> = responses.iter().filter_map(to_release_summary).collect();
+    let installed = version("0.5.0-rc.2");
+    match select_rollback(&installed, &summaries) {
+        RollbackCheck::Available { release, .. } => assert_eq!(release.tag, "v0.4.0"),
+        other => panic!("expected rollback to final 0.4.0, got {other:?}"),
+    }
+}
+
+#[test]
+fn rollback_reports_unavailable_when_the_stable_feed_is_empty() {
+    let installed = version("0.5.0-rc.2");
+    assert_eq!(select_rollback(&installed, &[]), RollbackCheck::Unavailable);
 }
 
 #[test]

@@ -13,11 +13,13 @@ use super::release_channel::{
 };
 
 const API_ROOT: &str = "https://api.github.com/repos/lgse/strata/releases";
+const COMMITS_ROOT: &str = "https://api.github.com/repos/lgse/strata/commits";
 const RELEASES_URL: &str = "https://github.com/lgse/strata/releases";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 /// How many of the most recent releases (final and prerelease) the preview
-/// feed enumerates. High enough to comfortably span a channel switch or a
-/// rollback search without paginating.
+/// feed enumerates. Only ever used to find a release *newer* than the
+/// installed one, so a bounded page is safe: an update this page cannot
+/// reach is older than one it can.
 const PREVIEW_PAGE_SIZE: u32 = 30;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -96,7 +98,12 @@ struct ReleaseResponse {
     #[serde(default)]
     prerelease: bool,
     published_at: Option<String>,
-    target_commitish: Option<String>,
+}
+
+/// The single field this code needs from GitHub's commit representation.
+#[derive(Deserialize)]
+struct CommitResponse {
+    sha: String,
 }
 
 #[derive(Deserialize)]
@@ -120,24 +127,14 @@ fn agent() -> ureq::Agent {
         .into()
 }
 
-fn request_release(url: &str) -> Result<ReleaseResponse, ureq::Error> {
+fn request_json<T: serde::de::DeserializeOwned>(url: &str) -> Result<T, ureq::Error> {
     agent()
         .get(url)
         .header("Accept", "application/vnd.github+json")
         .header("X-GitHub-Api-Version", "2022-11-28")
         .header("User-Agent", "strata-file-manager")
         .call()
-        .and_then(|mut response| response.body_mut().read_json::<ReleaseResponse>())
-}
-
-fn request_releases(url: &str) -> Result<Vec<ReleaseResponse>, ureq::Error> {
-    agent()
-        .get(url)
-        .header("Accept", "application/vnd.github+json")
-        .header("X-GitHub-Api-Version", "2022-11-28")
-        .header("User-Agent", "strata-file-manager")
-        .call()
-        .and_then(|mut response| response.body_mut().read_json::<Vec<ReleaseResponse>>())
+        .and_then(|mut response| response.body_mut().read_json::<T>())
 }
 
 /// Converts a GitHub API release into [`release_channel`]'s pure
@@ -166,7 +163,6 @@ fn to_release_summary(release: &ReleaseResponse) -> Option<ReleaseSummary> {
         prerelease: release.prerelease,
         download_url,
         published_at: release.published_at.clone(),
-        commit: release.target_commitish.clone(),
         notes: release.body.clone().unwrap_or_default(),
     })
 }
@@ -182,7 +178,9 @@ fn release_metadata(release: &ReleaseSummary) -> ReleaseMetadata {
         kind: release.version.build_kind(),
         tag: release.tag.clone(),
         published_at: release.published_at.clone(),
-        commit: release.commit.clone(),
+        // Resolved by `resolve_commit` on the worker thread; a release's own
+        // JSON carries no usable commit. See [`fetch_commit`].
+        commit: None,
     }
 }
 
@@ -198,7 +196,7 @@ fn release_metadata(release: &ReleaseSummary) -> ReleaseMetadata {
 /// `Ok(None)` covers both "no releases have been published yet" and "the
 /// tag GitHub returned failed to parse"; neither is a network failure.
 fn fetch_stable() -> Result<Option<ReleaseSummary>, ureq::Error> {
-    match request_release(&format!("{API_ROOT}/latest")) {
+    match request_json::<ReleaseResponse>(&format!("{API_ROOT}/latest")) {
         Ok(release) => Ok(to_release_summary(&release)),
         Err(ureq::Error::StatusCode(404)) => Ok(None),
         Err(error) => Err(error),
@@ -206,14 +204,39 @@ fn fetch_stable() -> Result<Option<ReleaseSummary>, ureq::Error> {
 }
 
 /// Fetches the most recent releases, final and prerelease alike, for the
-/// preview channel and for rollback search.
+/// preview channel.
 ///
 /// Kept as its own function rather than reused for [`Channel::Stable`]: a
 /// Stable user's code path must call [`fetch_stable`] instead, never this,
 /// so prerelease metadata never reaches that path at all.
 fn fetch_preview() -> Result<Vec<ReleaseSummary>, ureq::Error> {
-    let releases = request_releases(&format!("{API_ROOT}?per_page={PREVIEW_PAGE_SIZE}"))?;
+    let releases =
+        request_json::<Vec<ReleaseResponse>>(&format!("{API_ROOT}?per_page={PREVIEW_PAGE_SIZE}"))?;
     Ok(releases.iter().filter_map(to_release_summary).collect())
+}
+
+/// Resolves `tag` to the commit SHA it points at.
+///
+/// A release's own `target_commitish` cannot be used for this: GitHub
+/// ignores that value when the tag already exists, which is how
+/// `release.yml` publishes every release, so it comes back as the default
+/// branch name rather than a SHA. `/commits/{tag}` dereferences the
+/// annotated tag and returns the real commit.
+///
+/// `None` on any failure -- the dialog's identity block falls back to
+/// "Unknown", since an offered update must not hinge on a lookup that only
+/// feeds one display row.
+fn fetch_commit(tag: &str) -> Option<String> {
+    request_json::<CommitResponse>(&format!("{COMMITS_ROOT}/{tag}"))
+        .ok()
+        .map(|commit| commit.sha)
+}
+
+/// Fills in the commit the update dialog displays, off the GTK thread.
+/// Kept out of [`release_metadata`] so that every selection step stays
+/// pure and network-free.
+fn resolve_commit(release: &mut ReleaseMetadata) {
+    release.commit = fetch_commit(&release.tag);
 }
 
 /// Builds the `UpdateCheck` for an eligible release, or `UpToDate` in the
@@ -273,21 +296,39 @@ fn fetch_update(channel: Channel, installed: &Version) -> UpdateCheck {
         Channel::Preview => fetch_preview(),
     };
     match releases {
-        Ok(releases) => select_update(channel, installed, &releases),
+        Ok(releases) => {
+            let mut check = select_update(channel, installed, &releases);
+            if let UpdateCheck::Available { release, .. } = &mut check {
+                resolve_commit(release);
+            }
+            check
+        }
         Err(error) => UpdateCheck::Failed(request_error_message(&error)),
     }
 }
 
+/// Uses [`fetch_stable`] rather than the preview feed: the rollback target
+/// is by definition the newest final release, which is exactly what
+/// `/releases/latest` returns. The bounded preview page cannot answer this
+/// question -- enough consecutive prereleases would push the last final
+/// release off it and strand a preview user with no way back.
 fn fetch_rollback(installed: &Version) -> RollbackCheck {
-    match fetch_preview() {
-        Ok(releases) => select_rollback(installed, &releases),
+    match fetch_stable() {
+        Ok(release) => {
+            let releases: Vec<_> = release.into_iter().collect();
+            let mut check = select_rollback(installed, &releases);
+            if let RollbackCheck::Available { release, .. } = &mut check {
+                resolve_commit(release);
+            }
+            check
+        }
         Err(error) => RollbackCheck::Failed(request_error_message(&error)),
     }
 }
 
 fn fetch_exact_release(tag: &str) -> ReleaseNotes {
     let url = release_page_url(tag);
-    match request_release(&format!("{API_ROOT}/tags/{tag}")) {
+    match request_json::<ReleaseResponse>(&format!("{API_ROOT}/tags/{tag}")) {
         Ok(release) => match to_release_summary(&release) {
             Some(summary) => ReleaseNotes::Found(release_metadata(&summary)),
             None => ReleaseNotes::Unavailable { url },

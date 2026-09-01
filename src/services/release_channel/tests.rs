@@ -19,7 +19,6 @@ fn release(tag: &str) -> ReleaseSummary {
         prerelease: false,
         download_url: Some(format!("https://example.invalid/{tag}")),
         published_at: None,
-        commit: None,
         notes: String::new(),
     }
 }

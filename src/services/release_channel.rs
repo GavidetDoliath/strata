@@ -298,7 +298,6 @@ pub struct ReleaseSummary {
     /// an update the user cannot install must never be offered.
     pub download_url: Option<String>,
     pub published_at: Option<String>,
-    pub commit: Option<String>,
     pub notes: String,
 }
 
