@@ -2,7 +2,33 @@
 
 use std::fs;
 
-use super::{find_binaries, first_hash_token};
+use super::{find_binaries, first_hash_token, stage_binary_path, stage_workdir};
+
+#[test]
+fn stage_workdir_is_unique_per_call() {
+    let exe_dir = tempfile::tempdir().expect("create scratch exe dir");
+    let first = stage_workdir(exe_dir.path()).expect("stage first workdir");
+    let second = stage_workdir(exe_dir.path()).expect("stage second workdir");
+
+    assert_ne!(first.path(), second.path());
+    assert!(first.path().is_dir());
+    assert!(second.path().is_dir());
+    // Both live inside `exe_dir`, matching the old process-scoped scheme's
+    // placement, just no longer sharing a single path within it.
+    assert_eq!(first.path().parent(), Some(exe_dir.path()));
+    assert_eq!(second.path().parent(), Some(exe_dir.path()));
+}
+
+#[test]
+fn stage_binary_path_is_unique_per_call() {
+    let exe_dir = tempfile::tempdir().expect("create scratch exe dir");
+    let first = stage_binary_path(exe_dir.path()).expect("stage first binary path");
+    let second = stage_binary_path(exe_dir.path()).expect("stage second binary path");
+
+    assert_ne!(first.path(), second.path());
+    assert_eq!(first.path().parent(), Some(exe_dir.path()));
+    assert_eq!(second.path().parent(), Some(exe_dir.path()));
+}
 
 #[test]
 fn first_hash_token_lowercases_and_ignores_trailing_filename() {

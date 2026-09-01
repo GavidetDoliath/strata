@@ -57,15 +57,44 @@ fn perform_install(download_url: &str, progress: &Sender<UpdateInstall>) -> Resu
         .parent()
         .ok_or_else(|| "Could not determine the install directory".to_owned())?;
 
-    let workdir = exe_dir.join(format!(".strata-update-{}", std::process::id()));
-    fs::create_dir_all(&workdir).map_err(|error| format!("Could not stage the update: {error}"))?;
-    let cleanup = || {
-        let _ = fs::remove_dir_all(&workdir);
-    };
+    // A unique-per-install directory, not the old process-scoped
+    // `.strata-update-{pid}`: with three independent install drivers (the
+    // update row, rollback, and the update dialog) that can all be reachable
+    // at once on a preview build, a shared path was how two installs racing
+    // over the same archive and staged binary corrupted each other. The
+    // shared `InstallGuard` in `ui::settings` now also prevents a second
+    // install from starting at all, but a unique path is kept as its own
+    // layer of defense -- e.g. against a leftover directory from a
+    // hard-killed previous process.
+    let workdir = stage_workdir(exe_dir)?;
+    try_install(
+        download_url,
+        workdir.path(),
+        exe_dir,
+        &current_exe,
+        progress,
+    )
+    // `workdir` removes its directory on drop here, on both the success and
+    // error paths, replacing the old manual `remove_dir_all` cleanup.
+}
 
-    let result = try_install(download_url, &workdir, exe_dir, &current_exe, progress);
-    cleanup();
-    result
+/// Creates a fresh, uniquely-named staging directory for one install inside
+/// `exe_dir`. See `perform_install` for why uniqueness matters.
+fn stage_workdir(exe_dir: &Path) -> Result<tempfile::TempDir, String> {
+    tempfile::Builder::new()
+        .prefix(".strata-update-")
+        .tempdir_in(exe_dir)
+        .map_err(|error| format!("Could not stage the update: {error}"))
+}
+
+/// Creates a fresh, uniquely-named path for the staged replacement binary
+/// inside `exe_dir`, for the same reason as `stage_workdir`.
+fn stage_binary_path(exe_dir: &Path) -> Result<tempfile::NamedTempFile, String> {
+    tempfile::Builder::new()
+        .prefix(".strata-update-")
+        .suffix(".tmp")
+        .tempfile_in(exe_dir)
+        .map_err(|error| format!("Could not stage the new binary: {error}"))
 }
 
 fn try_install(
@@ -93,11 +122,12 @@ fn try_install(
     let binary_path = binary_paths
         .first()
         .ok_or_else(|| "Could not find the strata binary in the downloaded archive".to_owned())?;
-    let staged = exe_dir.join(format!(".strata-update-{}.tmp", std::process::id()));
-    fs::copy(binary_path, &staged)
+    let staged = stage_binary_path(exe_dir)?;
+    fs::copy(binary_path, staged.path())
         .map_err(|error| format!("Could not stage the new binary: {error}"))?;
-    set_executable(&staged)?;
-    fs::rename(&staged, current_exe)
+    set_executable(staged.path())?;
+    staged
+        .persist(current_exe)
         .map_err(|error| format!("Could not replace the installed binary: {error}"))?;
 
     Ok(())
