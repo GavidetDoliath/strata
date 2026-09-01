@@ -31,6 +31,15 @@ use super::{
 type ThemeCards = Rc<RefCell<Vec<(String, gtk::Button, gtk::Image)>>>;
 pub(super) type UpdateNoticeHandler = Rc<dyn Fn(Option<(ReleaseMetadata, String)>)>;
 
+/// Shared "an install is running" guard across the three places
+/// [`services::install_update`] is ever called from: [`update_check_row`],
+/// [`rollback_option`], and [`show_update_dialog`]. On a preview build the
+/// update row and the rollback row sit on the same page, and the update
+/// dialog can be open alongside either -- without one guard shared across
+/// all three, two of them could start installs at once and race over
+/// `update_install`'s staging paths. See [`start_install`].
+pub(super) type InstallGuard = Rc<Cell<bool>>;
+
 const DIALOG_WIDTH: i32 = 920;
 const DIALOG_HEIGHT: i32 = 680;
 const DIALOG_MARGIN: i32 = 24;
@@ -158,6 +167,7 @@ pub fn build_layer(
     root: &BlurBin,
     themes: Rc<ThemeManager>,
     update_notice: UpdateNoticeHandler,
+    install_guard: InstallGuard,
 ) -> gtk::Box {
     let layer = gtk::Box::new(gtk::Orientation::Vertical, 0);
     layer.add_css_class("app-modal-layer");
@@ -206,7 +216,7 @@ pub fn build_layer(
         .build();
     stack.add_named(&general_page(browser, themes.clone()), Some("general"));
     stack.add_named(
-        &updates_page(themes.clone(), update_notice),
+        &updates_page(themes.clone(), update_notice, install_guard),
         Some("updates"),
     );
     stack.add_named(&keybindings_page(), Some("keybindings"));
@@ -356,7 +366,11 @@ fn general_page(browser: &BrowserView, manager: Rc<ThemeManager>) -> gtk::Widget
     scrollable_page(&preferences, None)
 }
 
-fn updates_page(manager: Rc<ThemeManager>, update_notice: UpdateNoticeHandler) -> gtk::Widget {
+fn updates_page(
+    manager: Rc<ThemeManager>,
+    update_notice: UpdateNoticeHandler,
+    install_guard: InstallGuard,
+) -> gtk::Widget {
     let preferences = page_content();
     append_heading(&preferences, "UPDATE PREFERENCES");
 
@@ -368,6 +382,7 @@ fn updates_page(manager: Rc<ThemeManager>, update_notice: UpdateNoticeHandler) -
         manager.clone(),
         update_notice.clone(),
         available_notes.clone(),
+        install_guard.clone(),
     );
 
     preferences.append(&channel_option(manager.clone(), run_check.clone()));
@@ -382,7 +397,7 @@ fn updates_page(manager: Rc<ThemeManager>, update_notice: UpdateNoticeHandler) -
     preferences.append(&update_row);
 
     if crate::build_info::build_kind() != BuildKind::Stable {
-        preferences.append(&rollback_option(manager.clone()));
+        preferences.append(&rollback_option(manager.clone(), install_guard));
     }
 
     append_heading(&preferences, "RELEASE NOTES");
@@ -666,6 +681,7 @@ fn update_check_row(
     manager: Rc<ThemeManager>,
     update_notice: UpdateNoticeHandler,
     available_notes: ReleaseNotesCard,
+    install_guard: InstallGuard,
 ) -> (gtk::Box, Rc<dyn Fn()>) {
     let row = gtk::Box::new(gtk::Orientation::Vertical, 0);
     row.add_css_class("settings-option");
@@ -770,7 +786,6 @@ fn update_check_row(
                                 show_release_notes(&available_notes, release);
                                 *pending_download.borrow_mut() = Some(InstallRequest {
                                     download_url: download_url.clone(),
-                                    version: release.version.clone(),
                                 });
                                 button.set_label("Install update");
                             }
@@ -810,7 +825,6 @@ fn update_check_row(
             progress.set_visible(true);
             progress.remove_css_class("error");
             button.set_sensitive(false);
-            let receiver = services::install_update(request);
             let progress_for_progress = progress.clone();
             let status_for_progress = status.clone();
             let checking_for_installed = checking.clone();
@@ -821,8 +835,9 @@ fn update_check_row(
             let status_for_failed = status.clone();
             let button_for_failed = button.clone();
             let progress_for_failed = progress.clone();
-            drive_install(
-                receiver,
+            let started = start_install(
+                &install_guard,
+                request,
                 move |event| {
                     apply_install_progress(&status_for_progress, &progress_for_progress, event)
                 },
@@ -845,6 +860,18 @@ fn update_check_row(
                     checking_for_failed.set(false);
                 },
             );
+            if let Err(request) = started {
+                // Another install-guarded flow (the rollback row or the
+                // update dialog) is already running. Leave this row
+                // re-triable rather than stuck mid-"downloading" with
+                // nothing actually happening.
+                status.set_text("Another install is already running — try again shortly.");
+                progress.set_visible(false);
+                button.set_label("Install update");
+                button.set_sensitive(true);
+                checking.set(false);
+                *pending_download.borrow_mut() = Some(request);
+            }
         } else {
             clicked_check();
         }
@@ -910,6 +937,51 @@ fn drive_install(
     });
 }
 
+/// Starts `request`'s install unless another install-guarded flow is
+/// already running, driving it with [`drive_install`] and clearing `guard`
+/// once it reaches a terminal state.
+///
+/// `guard` is shared across all three of [`update_check_row`],
+/// [`rollback_option`], and [`show_update_dialog`] -- the only call sites
+/// of [`services::install_update`] -- since on a preview build the update
+/// row and the rollback row sit on the same page, and the update dialog can
+/// be open alongside either. Without a guard shared across all three,
+/// clicking two of their install buttons in succession could start two
+/// threads writing the same staging paths out from under each other.
+///
+/// Returns `Ok(())` once an install has started, or `Err(request)` --
+/// handing `request` back unused -- if `guard` was already held. Callers
+/// must handle the `Err` case by leaving their own button/status in a
+/// re-triable state, since the click that produced it did not actually
+/// start anything.
+fn start_install(
+    guard: &InstallGuard,
+    request: InstallRequest,
+    on_progress: impl Fn(InstallProgress) + 'static,
+    on_installed: impl Fn() + 'static,
+    on_failed: impl Fn(Option<String>) + 'static,
+) -> Result<(), InstallRequest> {
+    if guard.replace(true) {
+        return Err(request);
+    }
+    let receiver = services::install_update(request);
+    let guard_for_installed = guard.clone();
+    let guard_for_failed = guard.clone();
+    drive_install(
+        receiver,
+        on_progress,
+        move || {
+            guard_for_installed.set(false);
+            on_installed();
+        },
+        move |message| {
+            guard_for_failed.set(false);
+            on_failed(message);
+        },
+    );
+    Ok(())
+}
+
 /// `update_check_row`'s and `rollback_option`'s shared progress rendering:
 /// both use identical "Downloading update… "/"Verifying update…"/"Installing
 /// update…" copy, unlike `show_update_dialog`'s dialog-specific wording.
@@ -952,7 +1024,7 @@ fn apply_install_progress(
 /// starts the install -- the issue mandates confirmation before replacing
 /// binaries, and this reuses the same idiom already used for ordinary
 /// updates rather than introducing a new confirmation widget.
-fn rollback_option(manager: Rc<ThemeManager>) -> gtk::Box {
+fn rollback_option(manager: Rc<ThemeManager>, install_guard: InstallGuard) -> gtk::Box {
     let row = gtk::Box::new(gtk::Orientation::Vertical, 0);
     row.add_css_class("settings-option");
     let summary = gtk::Box::new(gtk::Orientation::Horizontal, 16);
@@ -1028,10 +1100,8 @@ fn rollback_option(manager: Rc<ThemeManager>) -> gtk::Box {
                                  stable.",
                                     release.version
                                 ));
-                                *pending_download.borrow_mut() = Some(InstallRequest {
-                                    download_url,
-                                    version: release.version,
-                                });
+                                *pending_download.borrow_mut() =
+                                    Some(InstallRequest { download_url });
                                 button.set_label("Return to stable");
                             }
                             RollbackCheck::Unavailable => {
@@ -1074,7 +1144,6 @@ fn rollback_option(manager: Rc<ThemeManager>) -> gtk::Box {
             progress.set_visible(true);
             progress.remove_css_class("error");
             button.set_sensitive(false);
-            let receiver = services::install_update(request);
             let progress_for_progress = progress.clone();
             let status_for_progress = status.clone();
             let checking_for_installed = checking.clone();
@@ -1087,8 +1156,9 @@ fn rollback_option(manager: Rc<ThemeManager>) -> gtk::Box {
             let button_for_failed = button.clone();
             let progress_for_failed = progress.clone();
             let pending_download_for_failed = pending_download.clone();
-            drive_install(
-                receiver,
+            let started = start_install(
+                &install_guard,
+                request,
                 move |event| {
                     apply_install_progress(&status_for_progress, &progress_for_progress, event)
                 },
@@ -1118,6 +1188,16 @@ fn rollback_option(manager: Rc<ThemeManager>) -> gtk::Box {
                     *pending_download_for_failed.borrow_mut() = None;
                 },
             );
+            if let Err(request) = started {
+                // Another install-guarded flow (the update row or the
+                // update dialog) is already running.
+                status.set_text("Another install is already running — try again shortly.");
+                progress.set_visible(false);
+                button.set_label("Return to stable");
+                button.set_sensitive(true);
+                checking.set(false);
+                *pending_download.borrow_mut() = Some(request);
+            }
         } else {
             clicked_check();
         }
@@ -1170,6 +1250,7 @@ pub(super) fn show_update_dialog(
     parent: &gtk::Window,
     release: &ReleaseMetadata,
     download_url: String,
+    install_guard: InstallGuard,
 ) {
     let Some(window_overlay) = parent.child().and_downcast::<gtk::Overlay>() else {
         return;
@@ -1293,7 +1374,6 @@ pub(super) fn show_update_dialog(
     let action_root = blurred_root.clone();
     let application = parent.application();
     let action_close = close.clone();
-    let version = release.version.clone();
     action.connect_clicked(move |button| {
         if installed.get() {
             restart(application.as_ref());
@@ -1311,10 +1391,6 @@ pub(super) fn show_update_dialog(
         action_close.set_sensitive(false);
         progress.set_visible(true);
         status.set_text("Starting download…");
-        let receiver = services::install_update(InstallRequest {
-            download_url: download_url.clone(),
-            version: version.clone(),
-        });
         let progress_for_progress = progress.clone();
         let status_for_progress = status.clone();
         let progress_for_installed = progress.clone();
@@ -1324,8 +1400,17 @@ pub(super) fn show_update_dialog(
         let progress_for_failed = progress.clone();
         let status_for_failed = status.clone();
         let action_for_failed = button.clone();
-        drive_install(
-            receiver,
+        let status_for_guard = status.clone();
+        let progress_for_guard = progress.clone();
+        let action_for_guard = button.clone();
+        let started_for_guard = started.clone();
+        let install_guard = install_guard.clone();
+        let request = InstallRequest {
+            download_url: download_url.clone(),
+        };
+        let outcome = start_install(
+            &install_guard,
+            request,
             move |event| match event {
                 InstallProgress::Downloading { downloaded, total } => {
                     if let Some(total) = total.filter(|total| *total > 0) {
@@ -1371,6 +1456,17 @@ pub(super) fn show_update_dialog(
                 action_for_failed.set_sensitive(true);
             },
         );
+        if outcome.is_err() {
+            // Another install-guarded flow (the update row or the rollback
+            // row) is already running. Reset `started` too, so the next
+            // click retries the install instead of being treated as a
+            // dismissal -- this click never actually started one.
+            status_for_guard.set_text("Another install is already running — try again shortly.");
+            progress_for_guard.set_visible(false);
+            action_for_guard.set_sensitive(true);
+            cancel.set_sensitive(true);
+            started_for_guard.set(false);
+        }
     });
 }
 

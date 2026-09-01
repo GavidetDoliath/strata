@@ -20,16 +20,20 @@ pub enum UpdateInstall {
     Failed(String),
 }
 
-/// What to install: the archive to download and the version it is expected
-/// to contain.
+/// What to install: the archive to download.
 ///
-/// The caller needs `version` to report precisely which build was
-/// installed, and the rollback caller needs it to flip the persisted
-/// channel afterwards once the install succeeds.
+/// Earlier versions of this type also carried the expected `version`
+/// string, but nothing ever read it: `install_update` only uses
+/// `download_url`, and the rollback caller (which was documented as
+/// needing it to flip the persisted channel afterwards) sets
+/// `Channel::Stable` unconditionally instead. Removed rather than wired up
+/// -- verifying the extracted binary against an expected version would
+/// mean executing an untrusted downloaded binary before replacing the
+/// installed one, which is a bigger change than this field's one dead
+/// reader justified.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InstallRequest {
     pub download_url: String,
-    pub version: String,
 }
 
 /// Downloads, verifies, and installs `request`'s archive in place of the running

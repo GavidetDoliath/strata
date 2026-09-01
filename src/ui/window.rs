@@ -264,13 +264,23 @@ pub fn present_location(application: &gtk::Application, location: Option<PathBuf
     let available_update = Rc::new(RefCell::new(
         None::<(crate::services::ReleaseMetadata, String)>,
     ));
+    // Shared across the settings page's update/rollback rows and this
+    // dialog, so at most one install ever runs at a time -- see
+    // `settings::InstallGuard`.
+    let install_guard: super::settings::InstallGuard = Rc::new(Cell::new(false));
     let available_for_click = available_update.clone();
     let update_parent = window.clone().upcast::<gtk::Window>();
+    let install_guard_for_dialog = install_guard.clone();
     update_button.connect_clicked(move |_| {
         let Some((release, download_url)) = available_for_click.borrow().clone() else {
             return;
         };
-        super::settings::show_update_dialog(&update_parent, &release, download_url);
+        super::settings::show_update_dialog(
+            &update_parent,
+            &release,
+            download_url,
+            install_guard_for_dialog.clone(),
+        );
     });
     let available_for_notice = available_update.clone();
     let update_notice: super::settings::UpdateNoticeHandler = Rc::new(move |release| {
@@ -295,6 +305,7 @@ pub fn present_location(application: &gtk::Application, location: Option<PathBuf
         &blurred_root,
         theme_manager,
         update_notice,
+        install_guard,
     );
     window_overlay.add_overlay(&settings_layer);
     let shown_settings = settings_layer.clone();
