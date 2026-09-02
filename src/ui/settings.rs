@@ -460,8 +460,6 @@ fn updates_page(
         install_guard.clone(),
     );
 
-    preferences.append(&channel_option(manager.clone(), run_check.clone()));
-
     let auto_check_enabled = manager.checks_for_updates();
     let (auto_check_row, auto_check) = settings_option(
         "Automatically check for updates",
@@ -469,6 +467,10 @@ fn updates_page(
         auto_check_enabled,
     );
     preferences.append(&auto_check_row);
+
+    let channel_row = channel_option(manager.clone(), run_check.clone());
+    channel_row.set_sensitive(auto_check_enabled);
+    preferences.append(&channel_row);
     preferences.append(&update_row);
 
     if crate::build_info::build_kind() != BuildKind::Stable {
@@ -491,6 +493,7 @@ fn updates_page(
     auto_check.connect_active_notify(move |toggle| {
         let enabled = toggle.is_active();
         manager_for_updates.set_checks_for_updates(enabled);
+        channel_row.set_sensitive(enabled);
         if enabled {
             toggled_check();
         } else {
