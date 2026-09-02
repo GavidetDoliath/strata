@@ -13,7 +13,7 @@ use crate::{
     assets::icons,
     services::{
         self, BuildKind, Channel, InstallRequest, ReleaseMetadata, ReleaseNoteBlock, ReleaseNotes,
-        RollbackCheck, UpdateCheck, UpdateInstall, Version,
+        UpdateCheck, UpdateInstall, Version,
     },
 };
 
@@ -30,13 +30,10 @@ use super::{
 type ThemeCards = Rc<RefCell<Vec<(String, gtk::Button, gtk::Image)>>>;
 pub(super) type UpdateNoticeHandler = Rc<dyn Fn(Option<(ReleaseMetadata, String)>)>;
 
-/// Shared "an install is running" guard across the three places
-/// [`services::install_update`] is ever called from: [`update_check_row`],
-/// [`rollback_option`], and [`show_update_dialog`]. On a preview build the
-/// update row and the rollback row sit on the same page, and the update
-/// dialog can be open alongside either -- without one guard shared across
-/// all three, two of them could start installs at once and race over
-/// `update_install`'s staging paths. See [`start_install`].
+/// Shared "an install is running" guard across the update row and update
+/// dialog, the two places [`services::install_update`] is called. Without one
+/// process-wide guard, separate windows could replace the executable at the
+/// same time. See [`start_install`].
 pub(super) type InstallGuard = Rc<Cell<bool>>;
 
 thread_local! {
@@ -46,12 +43,10 @@ thread_local! {
 /// The one [`InstallGuard`] for this process.
 ///
 /// Every install writes the *same* target -- the running executable -- so
-/// the guard has to span every window, not just the three drivers within
-/// one. A per-window guard let an update started in one window and a
-/// rollback started in another replace that executable concurrently: the
-/// last write won, so a rollback could report success and persist
-/// [`Channel::Stable`] while a preview binary was in fact the one left
-/// installed.
+/// the guard has to span every window, not just the controls within one. A
+/// per-window guard would let installs started in separate windows replace
+/// that executable concurrently, leaving the last writer as the installed
+/// build.
 ///
 /// A `thread_local` `Rc` (rather than a `Mutex`) is the whole story here
 /// because every window is built on the single GTK main thread, from
@@ -473,10 +468,6 @@ fn updates_page(
     preferences.append(&channel_row);
     preferences.append(&update_row);
 
-    if crate::build_info::build_kind() != BuildKind::Stable {
-        preferences.append(&rollback_option(manager.clone(), install_guard));
-    }
-
     append_heading(&preferences, "RELEASE NOTES");
     let current_notes = release_notes_card(
         &format!(
@@ -764,6 +755,7 @@ fn is_stale_check(result_generation: u64, current_generation: u64) -> bool {
 /// URL the installer actually uses.
 struct PendingInstall {
     kind: BuildKind,
+    returns_to_stable: bool,
     request: InstallRequest,
 }
 
@@ -800,7 +792,7 @@ fn update_check_row(
     let copy = gtk::Box::new(gtk::Orientation::Vertical, 2);
     copy.set_hexpand(true);
     copy.set_valign(gtk::Align::Center);
-    let title = gtk::Label::new(Some("Check for updates"));
+    let title = gtk::Label::new(Some("Updates"));
     title.set_xalign(0.0);
     title.add_css_class("settings-option-title");
     let status = gtk::Label::new(Some(&installed_version_status(
@@ -892,6 +884,7 @@ fn update_check_row(
             let update_notice = update_notice.clone();
             let pending_download = pending_download.clone();
             let available_notes = available_notes.clone();
+            let manager = manager.clone();
             glib::timeout_add_local(Duration::from_millis(100), move || {
                 if is_stale_check(my_generation, generation.get()) {
                     // A newer check has since started; that one owns
@@ -902,7 +895,24 @@ fn update_check_row(
                 }
                 match receiver.try_recv() {
                     Ok(result) => {
-                        status.set_markup(&update_check_message(&result));
+                        let returns_to_stable = matches!(
+                            &result,
+                            UpdateCheck::Available { release, .. }
+                                if manager.release_channel() == Channel::Stable
+                                    && crate::build_info::build_kind() != BuildKind::Stable
+                                    && release.kind == BuildKind::Stable
+                        );
+                        if returns_to_stable {
+                            if let UpdateCheck::Available { release, .. } = &result {
+                                status.set_markup(&format!(
+                                    "Stable channel target: <a href=\"{}\">v{}</a>",
+                                    glib::markup_escape_text(&release.url),
+                                    glib::markup_escape_text(&release.version),
+                                ));
+                            }
+                        } else {
+                            status.set_markup(&update_check_message(&result));
+                        }
                         available_notes
                             .container
                             .set_visible(shows_available_release_notes(&result));
@@ -923,11 +933,16 @@ fn update_check_row(
                                 show_release_notes(&available_notes, release);
                                 *pending_download.borrow_mut() = Some(PendingInstall {
                                     kind: release.kind,
+                                    returns_to_stable,
                                     request: InstallRequest {
                                         download_url: download_url.clone(),
                                     },
                                 });
-                                button.set_label("Install update");
+                                button.set_label(if returns_to_stable {
+                                    "Return to stable"
+                                } else {
+                                    "Install update"
+                                });
                             }
                             UpdateCheck::UpToDate | UpdateCheck::Failed(_) => {}
                         }
@@ -969,12 +984,17 @@ fn update_check_row(
             }
             let PendingInstall {
                 kind: offered_kind,
+                returns_to_stable,
                 request,
             } = pending;
             if checking.replace(true) {
                 return;
             }
-            status.set_text("Downloading update…");
+            status.set_text(if returns_to_stable {
+                "Downloading stable release…"
+            } else {
+                "Downloading update…"
+            });
             progress.set_fraction(0.0);
             progress.set_visible(true);
             progress.remove_css_class("error");
@@ -996,7 +1016,11 @@ fn update_check_row(
                     apply_install_progress(&status_for_progress, &progress_for_progress, event)
                 },
                 move || {
-                    status_for_installed.set_text("Update installed — restart to apply");
+                    status_for_installed.set_text(if returns_to_stable {
+                        "Stable release installed — restart to apply"
+                    } else {
+                        "Update installed — restart to apply"
+                    });
                     button_for_installed.set_label("Restart now");
                     button_for_installed.set_sensitive(true);
                     installed_for_installed.set(true);
@@ -1015,17 +1039,22 @@ fn update_check_row(
                 },
             );
             if let Err(request) = started {
-                // Another install-guarded flow (the rollback row or the
-                // update dialog) is already running. Leave this row
+                // An install from an update dialog or another window is
+                // already running. Leave this row
                 // re-triable rather than stuck mid-"downloading" with
                 // nothing actually happening.
                 status.set_text("Another install is already running — try again shortly.");
                 progress.set_visible(false);
-                button.set_label("Install update");
+                button.set_label(if returns_to_stable {
+                    "Return to stable"
+                } else {
+                    "Install update"
+                });
                 button.set_sensitive(true);
                 checking.set(false);
                 *pending_download.borrow_mut() = Some(PendingInstall {
                     kind: offered_kind,
+                    returns_to_stable,
                     request,
                 });
             }
@@ -1050,15 +1079,12 @@ enum InstallProgress {
 /// Drives an install `receiver` on the GTK main loop until it reports a
 /// terminal outcome, then stops.
 ///
-/// This is the shared shape behind both of `update_check_row`'s and
-/// `show_update_dialog`'s (and now `rollback_option`'s) install flows: poll
-/// `receiver` every 100ms, forward non-terminal updates to `on_progress`,
-/// and invoke exactly one of `on_installed`/`on_failed` once a terminal
-/// state is reached. Deliberately does *not* format any status text itself
-/// -- the three existing call sites render the same states with slightly
-/// different copy, and this only extracts the polling/control-flow
-/// plumbing they had all duplicated, not their (intentionally distinct)
-/// wording. `on_failed` receives `Some(message)` for an explicit
+/// This is the shared shape behind `update_check_row`'s and
+/// `show_update_dialog`'s install flows: poll `receiver` every 100ms, forward
+/// non-terminal updates to `on_progress`, and invoke exactly one of
+/// `on_installed`/`on_failed` once a terminal state is reached. Deliberately
+/// does *not* format status text itself because the two call sites use
+/// different wording. `on_failed` receives `Some(message)` for an explicit
 /// [`UpdateInstall::Failed`] or `None` when the receiver disconnected
 /// without ever reporting one, since callers render those two cases
 /// differently too.
@@ -1098,13 +1124,9 @@ fn drive_install(
 /// already running, driving it with [`drive_install`] and clearing `guard`
 /// once it reaches a terminal state.
 ///
-/// `guard` is shared across all three of [`update_check_row`],
-/// [`rollback_option`], and [`show_update_dialog`] -- the only call sites
-/// of [`services::install_update`] -- since on a preview build the update
-/// row and the rollback row sit on the same page, and the update dialog can
-/// be open alongside either. Without a guard shared across all three,
-/// clicking two of their install buttons in succession could start two
-/// threads writing the same staging paths out from under each other.
+/// `guard` is shared by [`update_check_row`] and [`show_update_dialog`] -- the
+/// only call sites of [`services::install_update`]. Without it, controls in
+/// separate windows could start two replacement threads concurrently.
 ///
 /// Returns `Ok(())` once an install has started, or `Err(request)` --
 /// handing `request` back unused -- if `guard` was already held. Callers
@@ -1139,9 +1161,8 @@ fn start_install(
     Ok(())
 }
 
-/// `update_check_row`'s and `rollback_option`'s shared progress rendering:
-/// both use identical "Downloading update… "/"Verifying update…"/"Installing
-/// update…" copy, unlike `show_update_dialog`'s dialog-specific wording.
+/// The update row's compact progress rendering, distinct from the update
+/// dialog's dialog-specific wording.
 fn apply_install_progress(
     status: &gtk::Label,
     progress: &gtk::ProgressBar,
@@ -1167,202 +1188,6 @@ fn apply_install_progress(
             status.set_text("Installing update…");
         }
     }
-}
-
-/// The "Return to stable" row: visible only when the running build itself
-/// is not [`BuildKind::Stable`] (see the `updates_page` call site), never
-/// gated on the *selected* channel preference -- gating on the preference
-/// would strand exactly the user who most needs this exit: someone running
-/// an RC who has already switched their preference back to Stable.
-///
-/// Resolves the newest stable release as soon as the page opens, then shows
-/// its exact version before enabling the explicit "Return to stable" action.
-/// The action itself remains the required confirmation before replacement;
-/// users do not need a redundant first click to discover a stable release.
-fn rollback_option(manager: Rc<ThemeManager>, install_guard: InstallGuard) -> gtk::Box {
-    let row = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    row.add_css_class("settings-option");
-    let summary = gtk::Box::new(gtk::Orientation::Horizontal, 16);
-    summary.set_vexpand(true);
-    let copy = gtk::Box::new(gtk::Orientation::Vertical, 2);
-    copy.set_hexpand(true);
-    copy.set_valign(gtk::Align::Center);
-    let title = gtk::Label::new(Some("Return to stable"));
-    title.set_xalign(0.0);
-    title.add_css_class("settings-option-title");
-    let status = gtk::Label::new(Some("Finding the newest stable release…"));
-    status.set_xalign(0.0);
-    status.set_wrap(true);
-    status.add_css_class("settings-option-description");
-    copy.append(&title);
-    copy.append(&status);
-    let progress = gtk::ProgressBar::new();
-    progress.add_css_class("settings-update-progress");
-    progress.set_hexpand(true);
-    progress.set_visible(false);
-    copy.append(&progress);
-    let button = gtk::Button::with_label("Return to stable");
-    button.add_css_class("settings-update-check");
-    button.set_valign(gtk::Align::Center);
-    button.set_sensitive(false);
-    summary.append(&copy);
-    summary.append(&button);
-    row.append(&summary);
-
-    let checking = Rc::new(Cell::new(false));
-    // Populated by the automatic lookup when the page opens; consumed when
-    // the user confirms the rollback.
-    let pending_download = Rc::new(RefCell::new(None::<InstallRequest>));
-    // Set once the rollback finishes, so the next click restarts instead of
-    // re-checking.
-    let installed = Rc::new(Cell::new(false));
-
-    let run_check: Rc<dyn Fn()> = Rc::new({
-        let checking = checking.clone();
-        let status = status.clone();
-        let button = button.clone();
-        let pending_download = pending_download.clone();
-        let installed = installed.clone();
-        let progress = progress.clone();
-        move || {
-            if checking.replace(true) {
-                return;
-            }
-            *pending_download.borrow_mut() = None;
-            installed.set(false);
-            button.set_label("Return to stable");
-            progress.set_fraction(0.0);
-            progress.set_visible(false);
-            progress.remove_css_class("error");
-            status.set_text("Finding the newest stable release…");
-            button.set_sensitive(false);
-            let receiver = services::check_rollback_target(crate::build_info::installed_version());
-            let checking = checking.clone();
-            let status = status.clone();
-            let button = button.clone();
-            let pending_download = pending_download.clone();
-            glib::timeout_add_local(Duration::from_millis(100), move || {
-                match receiver.try_recv() {
-                    Ok(result) => {
-                        match result {
-                            RollbackCheck::Available {
-                                release,
-                                download_url,
-                            } => {
-                                status.set_text(&format!(
-                                    "Newest stable release: v{}. Replace this prerelease build while preserving your preferences and data.",
-                                    release.version
-                                ));
-                                *pending_download.borrow_mut() =
-                                    Some(InstallRequest { download_url });
-                                button.set_label("Return to stable");
-                            }
-                            RollbackCheck::Unavailable => {
-                                status.set_text(
-                                    "The newest stable release is not available for this platform.",
-                                );
-                                button.set_label("Try again");
-                            }
-                            RollbackCheck::Failed(message) => {
-                                status.set_text(&format!(
-                                    "Couldn't load the newest stable release: {message}"
-                                ));
-                                button.set_label("Try again");
-                            }
-                        }
-                        button.set_sensitive(true);
-                        checking.set(false);
-                        glib::ControlFlow::Break
-                    }
-                    Err(TryRecvError::Empty) => glib::ControlFlow::Continue,
-                    Err(TryRecvError::Disconnected) => {
-                        status.set_text("Couldn't load the newest stable release");
-                        button.set_label("Try again");
-                        button.set_sensitive(true);
-                        checking.set(false);
-                        glib::ControlFlow::Break
-                    }
-                }
-            });
-        }
-    });
-
-    let clicked_check = run_check.clone();
-    button.connect_clicked(move |button| {
-        if installed.get() {
-            restart_application(button);
-            return;
-        }
-        if let Some(request) = pending_download.borrow_mut().take() {
-            if checking.replace(true) {
-                return;
-            }
-            status.set_text("Downloading stable release…");
-            progress.set_fraction(0.0);
-            progress.set_visible(true);
-            progress.remove_css_class("error");
-            button.set_sensitive(false);
-            let progress_for_progress = progress.clone();
-            let status_for_progress = status.clone();
-            let checking_for_installed = checking.clone();
-            let status_for_installed = status.clone();
-            let button_for_installed = button.clone();
-            let installed_for_installed = installed.clone();
-            let manager_for_installed = manager.clone();
-            let checking_for_failed = checking.clone();
-            let status_for_failed = status.clone();
-            let button_for_failed = button.clone();
-            let progress_for_failed = progress.clone();
-            let pending_download_for_failed = pending_download.clone();
-            let started = start_install(
-                &install_guard,
-                request,
-                move |event| {
-                    apply_install_progress(&status_for_progress, &progress_for_progress, event)
-                },
-                move || {
-                    // Only flip the persisted channel once the install has
-                    // actually succeeded -- a failed rollback must preserve
-                    // the selected prerelease channel and remain retryable.
-                    manager_for_installed.set_release_channel(Channel::Stable);
-                    status_for_installed.set_text("Stable release installed — restart to apply");
-                    button_for_installed.set_label("Restart now");
-                    button_for_installed.set_sensitive(true);
-                    installed_for_installed.set(true);
-                    checking_for_installed.set(false);
-                },
-                move |message| {
-                    match message {
-                        Some(message) => status_for_failed
-                            .set_text(&format!("Couldn't install stable release: {message}")),
-                        None => status_for_failed.set_text("Couldn't install stable release"),
-                    }
-                    progress_for_failed.add_css_class("error");
-                    button_for_failed.set_label("Try again");
-                    button_for_failed.set_sensitive(true);
-                    checking_for_failed.set(false);
-                    // Leave the button re-checkable rather than stuck on a
-                    // stale "Return to stable" label with nothing pending.
-                    *pending_download_for_failed.borrow_mut() = None;
-                },
-            );
-            if let Err(request) = started {
-                // Another install-guarded flow (the update row or the
-                // update dialog) is already running.
-                status.set_text("Another install is already running — try again shortly.");
-                progress.set_visible(false);
-                button.set_label("Return to stable");
-                button.set_sensitive(true);
-                checking.set(false);
-                *pending_download.borrow_mut() = Some(request);
-            }
-        } else {
-            clicked_check();
-        }
-    });
-
-    run_check();
-    row
 }
 
 /// Relaunches the (just-updated) executable and quits the current instance.
@@ -1655,8 +1480,8 @@ pub(super) fn show_update_dialog(
             },
         );
         if outcome.is_err() {
-            // Another install-guarded flow (the update row or the rollback
-            // row) is already running. Reset `started` too, so the next
+            // An install from the update row or another window is already
+            // running. Reset `started` too, so the next
             // click retries the install instead of being treated as a
             // dismissal -- this click never actually started one.
             status_for_guard.set_text("Another install is already running — try again shortly.");

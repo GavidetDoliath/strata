@@ -65,20 +65,6 @@ pub enum UpdateCheck {
     Failed(String),
 }
 
-/// The outcome of checking whether the user can return to [`Channel::Stable`]
-/// from a preview build. Mirrors [`UpdateCheck`]'s shape: `Unavailable`
-/// covers both "no final release exists" and "already on the target",
-/// neither of which is an error.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum RollbackCheck {
-    Available {
-        release: ReleaseMetadata,
-        download_url: String,
-    },
-    Unavailable,
-    Failed(String),
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ReleaseNotes {
     Found(ReleaseMetadata),
@@ -253,18 +239,6 @@ fn available_check(release: &ReleaseSummary) -> UpdateCheck {
     }
 }
 
-/// Builds the `RollbackCheck` for an eligible release; see [`available_check`]
-/// for why the `None` arm is unreachable in practice but handled anyway.
-fn available_rollback(release: &ReleaseSummary) -> RollbackCheck {
-    match &release.download_url {
-        Some(download_url) => RollbackCheck::Available {
-            release: release_metadata(release),
-            download_url: download_url.clone(),
-        },
-        None => RollbackCheck::Unavailable,
-    }
-}
-
 /// The pure selection step of [`check_for_updates`], split out so it can be
 /// exercised against fixtures with no network involved. Delegates every
 /// eligibility and ordering judgement to [`best_update`].
@@ -273,20 +247,19 @@ fn select_update(
     installed: &Version,
     releases: &[ReleaseSummary],
 ) -> UpdateCheck {
-    match best_update(channel, installed, releases) {
+    let candidate = if channel == Channel::Stable && installed.build_kind() != BuildKind::Stable {
+        // Selecting Stable while running a prerelease is an explicit channel
+        // transition, so offer the newest final release even when that is a
+        // semantic downgrade. Keeping this in the ordinary update result lets
+        // Settings present one channel-aware status/action card instead of a
+        // separate, competing rollback flow.
+        rollback_target(releases).filter(|release| release.version != *installed)
+    } else {
+        best_update(channel, installed, releases)
+    };
+    match candidate {
         Some(release) => available_check(release),
         None => UpdateCheck::UpToDate,
-    }
-}
-
-/// The pure selection step of [`check_rollback_target`]. `Unavailable` when
-/// [`rollback_target`] finds nothing, or when it finds exactly what is
-/// already installed -- rolling back to the running version is not a
-/// meaningful action.
-fn select_rollback(installed: &Version, releases: &[ReleaseSummary]) -> RollbackCheck {
-    match rollback_target(releases) {
-        Some(release) if release.version != *installed => available_rollback(release),
-        _ => RollbackCheck::Unavailable,
     }
 }
 
@@ -304,25 +277,6 @@ fn fetch_update(channel: Channel, installed: &Version) -> UpdateCheck {
             check
         }
         Err(error) => UpdateCheck::Failed(request_error_message(&error)),
-    }
-}
-
-/// Uses [`fetch_stable`] rather than the preview feed: the rollback target
-/// is by definition the newest final release, which is exactly what
-/// `/releases/latest` returns. The bounded preview page cannot answer this
-/// question -- enough consecutive prereleases would push the last final
-/// release off it and strand a preview user with no way back.
-fn fetch_rollback(installed: &Version) -> RollbackCheck {
-    match fetch_stable() {
-        Ok(release) => {
-            let releases: Vec<_> = release.into_iter().collect();
-            let mut check = select_rollback(installed, &releases);
-            if let RollbackCheck::Available { release, .. } = &mut check {
-                resolve_commit(release);
-            }
-            check
-        }
-        Err(error) => RollbackCheck::Failed(request_error_message(&error)),
     }
 }
 
@@ -557,19 +511,6 @@ pub fn check_for_updates(channel: Channel, installed: Version) -> Receiver<Updat
         .name("strata-update-check".into())
         .spawn(move || {
             let _sent = sender.send(fetch_update(channel, &installed));
-        });
-    drop(spawned);
-    receiver
-}
-
-/// Queries the newest final release off the GTK thread, for switching back
-/// to [`Channel::Stable`] from a prerelease build.
-pub fn check_rollback_target(installed: Version) -> Receiver<RollbackCheck> {
-    let (sender, receiver) = mpsc::channel();
-    let spawned = std::thread::Builder::new()
-        .name("strata-rollback-check".into())
-        .spawn(move || {
-            let _sent = sender.send(fetch_rollback(&installed));
         });
     drop(spawned);
     receiver

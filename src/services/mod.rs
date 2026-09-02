@@ -33,5 +33,4 @@ pub(crate) use update_check::{
     ReleaseMetadata, ReleaseNoteBlock, ReleaseNotes, UpdateCheck, check_for_updates,
     fetch_release_notes,
 };
-pub(crate) use update_check::{RollbackCheck, check_rollback_target};
 pub(crate) use update_install::{InstallRequest, UpdateInstall, install_update};

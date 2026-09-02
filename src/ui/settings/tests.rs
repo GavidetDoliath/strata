@@ -144,7 +144,7 @@ fn a_cached_offer_stays_installable_when_the_channel_still_allows_it() {
 fn every_window_installs_behind_one_process_wide_guard() {
     // Two windows each ask for a guard the way `ui::window::present` does.
     // Handing out two independent cells is what let an update in one window
-    // and a rollback in another replace the executable concurrently.
+    // and another update in a second window replace the executable concurrently.
     let first = install_guard();
     let second = install_guard();
     assert!(Rc::ptr_eq(&first, &second));

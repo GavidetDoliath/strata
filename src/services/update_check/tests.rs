@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 use super::{
-    BuildKind, Channel, ReleaseNoteBlock, ReleaseResponse, RollbackCheck, UpdateCheck, Version,
-    archive_name, parse_markdown, release_metadata, release_page_url, request_error_message,
-    select_rollback, select_update, to_release_summary,
+    BuildKind, Channel, ReleaseNoteBlock, ReleaseResponse, UpdateCheck, Version, archive_name,
+    parse_markdown, release_metadata, release_page_url, request_error_message, select_update,
+    to_release_summary,
 };
 
 fn version(tag: &str) -> Version {
@@ -274,73 +274,18 @@ fn preview_offers_final_release_over_an_installed_release_candidate() {
 }
 
 #[test]
-fn rollback_selects_the_newest_final_release_over_a_prerelease() {
-    let rc_asset = matching_asset_json("0.5.0-rc.2");
-    let final_asset = matching_asset_json("0.4.0");
-    let responses = release_response_list(&format!(
-        r#"[
-            {{"tag_name":"v0.5.0-rc.2","draft":false,"prerelease":true,"assets":[{rc_asset}]}},
-            {{"tag_name":"v0.4.0","draft":false,"prerelease":false,"assets":[{final_asset}]}}
-        ]"#
+fn selecting_stable_on_a_prerelease_offers_the_latest_final_as_the_channel_transition() {
+    let stable_asset = matching_asset_json("0.4.0");
+    let response = release_response(&format!(
+        r#"{{"tag_name":"v0.4.0","draft":false,"prerelease":false,"assets":[{stable_asset}]}}"#
     ));
-    let summaries: Vec<_> = responses.iter().filter_map(to_release_summary).collect();
+    let summary = to_release_summary(&response).expect("tag should parse");
     let installed = version("0.5.0-rc.2");
-    let result = select_rollback(&installed, &summaries);
-    match result {
-        RollbackCheck::Available { release, .. } => assert_eq!(release.tag, "v0.4.0"),
-        other => panic!("expected rollback to final 0.4.0, got {other:?}"),
+
+    match select_update(Channel::Stable, &installed, &[summary]) {
+        UpdateCheck::Available { release, .. } => assert_eq!(release.tag, "v0.4.0"),
+        other => panic!("expected the stable channel transition, got {other:?}"),
     }
-}
-
-#[test]
-fn rollback_selects_the_lone_latest_release_the_stable_feed_returns() {
-    // The shape `fetch_rollback` now passes in: `/releases/latest` yields at
-    // most one release, never a page that a run of prereleases could push
-    // the last final release off.
-    let asset = matching_asset_json("0.4.0");
-    let responses = release_response_list(&format!(
-        r#"[{{"tag_name":"v0.4.0","draft":false,"prerelease":false,"assets":[{asset}]}}]"#
-    ));
-    let summaries: Vec<_> = responses.iter().filter_map(to_release_summary).collect();
-    let installed = version("0.5.0-rc.2");
-    match select_rollback(&installed, &summaries) {
-        RollbackCheck::Available { release, .. } => assert_eq!(release.tag, "v0.4.0"),
-        other => panic!("expected rollback to final 0.4.0, got {other:?}"),
-    }
-}
-
-#[test]
-fn rollback_reports_unavailable_when_the_stable_feed_is_empty() {
-    let installed = version("0.5.0-rc.2");
-    assert_eq!(select_rollback(&installed, &[]), RollbackCheck::Unavailable);
-}
-
-#[test]
-fn rollback_reports_unavailable_when_already_on_the_target_version() {
-    let asset = matching_asset_json("0.5.0");
-    let responses = release_response_list(&format!(
-        r#"[{{"tag_name":"v0.5.0","draft":false,"prerelease":false,"assets":[{asset}]}}]"#
-    ));
-    let summaries: Vec<_> = responses.iter().filter_map(to_release_summary).collect();
-    let installed = version("0.5.0");
-    assert_eq!(
-        select_rollback(&installed, &summaries),
-        RollbackCheck::Unavailable
-    );
-}
-
-#[test]
-fn rollback_reports_unavailable_when_no_final_release_exists() {
-    let asset = matching_asset_json("0.5.0-rc.2");
-    let responses = release_response_list(&format!(
-        r#"[{{"tag_name":"v0.5.0-rc.2","draft":false,"prerelease":true,"assets":[{asset}]}}]"#
-    ));
-    let summaries: Vec<_> = responses.iter().filter_map(to_release_summary).collect();
-    let installed = version("0.5.0-rc.2");
-    assert_eq!(
-        select_rollback(&installed, &summaries),
-        RollbackCheck::Unavailable
-    );
 }
 
 // --- markdown rendering, untouched by this task ---------------------------

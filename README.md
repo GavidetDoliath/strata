@@ -252,7 +252,7 @@ Strata defaults to the **Stable** channel: only final tagged releases are ever o
 
 To try upcoming changes early, choose a channel in **Settings → Updates**. **Preview** receives curated alpha, beta, and release-candidate builds but excludes nightlies. **Nightly** receives every recognised prerelease, including daily development builds. The update dialog and release notes always identify the exact build kind.
 
-Changing back to Stable stops offering prereleases from that point on; it does not touch a prerelease already installed. To replace one, use **Return to stable** on the same page. It appears whenever the running build itself is not stable and installs the newest stable release while preserving your preferences and data.
+When a prerelease installation selects **Stable**, the Updates card immediately offers the newest stable release as the channel target—even when that requires a semantic downgrade—and labels the action **Return to stable**. Preview and Nightly selections use the same card for ordinary forward updates, so channel changes never create a separate competing rollback card.
 
 See [Releasing](docs/releasing.md) for the tag grammar these channels rely on and, for maintainers, how a release candidate is cut and promoted.
 
