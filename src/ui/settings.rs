@@ -1375,6 +1375,8 @@ fn restart_application(button: &gtk::Button) {
 }
 
 fn restart(application: Option<&gtk::Application>) {
+    use std::{os::unix::process::CommandExt, process::Stdio};
+
     let Ok(mut current_exe) = std::env::current_exe() else {
         return;
     };
@@ -1389,11 +1391,26 @@ fn restart(application: Option<&gtk::Application>) {
     {
         current_exe = path.into();
     }
-    // Give GApplication time to release its single-instance bus name before the
-    // replacement starts. Starting it immediately only re-activates this process.
+    // Wait for this process to exit completely before relaunching. A fixed
+    // delay could overlap the old and new GTK/Wayland clients and rapidly hand
+    // keyboard focus through an underlying terminal. Besides re-activating the
+    // old GApplication instance, that exposed a Foot/libxkbcommon crash on
+    // affected systems. Detach the waiter from inherited terminal streams and
+    // put it in its own process group so applying an update cannot disturb the
+    // terminal that launched Strata.
+    let parent_pid = std::process::id().to_string();
     if std::process::Command::new("sh")
-        .args(["-c", "sleep 0.25; exec \"$1\"", "strata-restart"])
+        .args([
+            "-c",
+            "while kill -0 \"$1\" 2>/dev/null; do sleep 0.1; done; sleep 0.5; exec \"$2\"",
+            "strata-restart",
+        ])
+        .arg(parent_pid)
         .arg(current_exe)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0)
         .spawn()
         .is_err()
     {
