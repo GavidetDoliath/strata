@@ -296,6 +296,14 @@ pub fn present_location(application: &gtk::Application, location: Option<PathBuf
     window.add_action(&search_action);
     application.set_accels_for_action("win.search", &["<Control>k"]);
 
+    let terminal_view = browser.clone();
+    let terminal_action = gio::SimpleAction::new("open-terminal", None);
+    terminal_action.connect_activate(move |_, _| {
+        terminal_view.open_terminal();
+    });
+    window.add_action(&terminal_action);
+    application.set_accels_for_action("win.open-terminal", &["<Primary>t"]);
+
     let update_button = sidebar.update_notice.clone();
     let update_area = sidebar.update_area.clone();
     let update_label = sidebar.update_label.clone();
@@ -587,6 +595,10 @@ fn install_keyboard_navigation(
             browser.toggle_hidden();
             return glib::Propagation::Stop;
         }
+        if is_open_terminal_shortcut(key, modifiers) {
+            view.open_terminal();
+            return glib::Propagation::Stop;
+        }
         let column_popover = focused
             .as_ref()
             .and_then(|focused| focused.ancestor(gtk::Popover::static_type()))
@@ -702,6 +714,13 @@ fn install_keyboard_navigation(
         glib::Propagation::Stop
     });
     window.add_controller(keys);
+}
+
+fn is_open_terminal_shortcut(key: gtk::gdk::Key, modifiers: gtk::gdk::ModifierType) -> bool {
+    modifiers.contains(gtk::gdk::ModifierType::CONTROL_MASK)
+        && !modifiers
+            .intersects(gtk::gdk::ModifierType::SHIFT_MASK | gtk::gdk::ModifierType::ALT_MASK)
+        && matches!(key, gtk::gdk::Key::t | gtk::gdk::Key::T)
 }
 
 fn is_sidebar_focus_shortcut(key: gtk::gdk::Key, modifiers: gtk::gdk::ModifierType) -> bool {
