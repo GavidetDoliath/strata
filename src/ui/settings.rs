@@ -1175,12 +1175,10 @@ fn apply_install_progress(
 /// would strand exactly the user who most needs this exit: someone running
 /// an RC who has already switched their preference back to Stable.
 ///
-/// Mirrors `update_check_row`'s two-step check/confirm/install/restart
-/// button flow: a first click resolves the newest stable release via
-/// [`services::check_rollback_target`], and only a second, explicit click
-/// starts the install -- the issue mandates confirmation before replacing
-/// binaries, and this reuses the same idiom already used for ordinary
-/// updates rather than introducing a new confirmation widget.
+/// Resolves the newest stable release as soon as the page opens, then shows
+/// its exact version before enabling the explicit "Return to stable" action.
+/// The action itself remains the required confirmation before replacement;
+/// users do not need a redundant first click to discover a stable release.
 fn rollback_option(manager: Rc<ThemeManager>, install_guard: InstallGuard) -> gtk::Box {
     let row = gtk::Box::new(gtk::Orientation::Vertical, 0);
     row.add_css_class("settings-option");
@@ -1192,9 +1190,7 @@ fn rollback_option(manager: Rc<ThemeManager>, install_guard: InstallGuard) -> gt
     let title = gtk::Label::new(Some("Return to stable"));
     title.set_xalign(0.0);
     title.add_css_class("settings-option-title");
-    let status = gtk::Label::new(Some(
-        "Replace this preview build with the newest stable release.",
-    ));
+    let status = gtk::Label::new(Some("Finding the newest stable release…"));
     status.set_xalign(0.0);
     status.set_wrap(true);
     status.add_css_class("settings-option-description");
@@ -1205,16 +1201,17 @@ fn rollback_option(manager: Rc<ThemeManager>, install_guard: InstallGuard) -> gt
     progress.set_hexpand(true);
     progress.set_visible(false);
     copy.append(&progress);
-    let button = gtk::Button::with_label("Check for stable release");
+    let button = gtk::Button::with_label("Return to stable");
     button.add_css_class("settings-update-check");
     button.set_valign(gtk::Align::Center);
+    button.set_sensitive(false);
     summary.append(&copy);
     summary.append(&button);
     row.append(&summary);
 
     let checking = Rc::new(Cell::new(false));
-    // Set once a check finds a stable release to roll back to; consumed by
-    // the button's next click instead of re-running a check.
+    // Populated by the automatic lookup when the page opens; consumed when
+    // the user confirms the rollback.
     let pending_download = Rc::new(RefCell::new(None::<InstallRequest>));
     // Set once the rollback finishes, so the next click restarts instead of
     // re-checking.
@@ -1233,11 +1230,11 @@ fn rollback_option(manager: Rc<ThemeManager>, install_guard: InstallGuard) -> gt
             }
             *pending_download.borrow_mut() = None;
             installed.set(false);
-            button.set_label("Check for stable release");
+            button.set_label("Return to stable");
             progress.set_fraction(0.0);
             progress.set_visible(false);
             progress.remove_css_class("error");
-            status.set_text("Checking for the latest stable release…");
+            status.set_text("Finding the newest stable release…");
             button.set_sensitive(false);
             let receiver = services::check_rollback_target(crate::build_info::installed_version());
             let checking = checking.clone();
@@ -1253,8 +1250,7 @@ fn rollback_option(manager: Rc<ThemeManager>, install_guard: InstallGuard) -> gt
                                 download_url,
                             } => {
                                 status.set_text(&format!(
-                                    "Stable v{} is available. Confirm to install it and return to \
-                                 stable.",
+                                    "Newest stable release: v{}. Replace this prerelease build while preserving your preferences and data.",
                                     release.version
                                 ));
                                 *pending_download.borrow_mut() =
@@ -1262,12 +1258,16 @@ fn rollback_option(manager: Rc<ThemeManager>, install_guard: InstallGuard) -> gt
                                 button.set_label("Return to stable");
                             }
                             RollbackCheck::Unavailable => {
-                                status.set_text("No stable release is available to return to yet.");
+                                status.set_text(
+                                    "The newest stable release is not available for this platform.",
+                                );
+                                button.set_label("Try again");
                             }
                             RollbackCheck::Failed(message) => {
                                 status.set_text(&format!(
-                                    "Couldn't check for a stable release: {message}"
+                                    "Couldn't load the newest stable release: {message}"
                                 ));
+                                button.set_label("Try again");
                             }
                         }
                         button.set_sensitive(true);
@@ -1276,7 +1276,8 @@ fn rollback_option(manager: Rc<ThemeManager>, install_guard: InstallGuard) -> gt
                     }
                     Err(TryRecvError::Empty) => glib::ControlFlow::Continue,
                     Err(TryRecvError::Disconnected) => {
-                        status.set_text("Couldn't check for a stable release");
+                        status.set_text("Couldn't load the newest stable release");
+                        button.set_label("Try again");
                         button.set_sensitive(true);
                         checking.set(false);
                         glib::ControlFlow::Break
@@ -1321,8 +1322,8 @@ fn rollback_option(manager: Rc<ThemeManager>, install_guard: InstallGuard) -> gt
                 },
                 move || {
                     // Only flip the persisted channel once the install has
-                    // actually succeeded -- a failed rollback must leave
-                    // the user on Preview and able to retry.
+                    // actually succeeded -- a failed rollback must preserve
+                    // the selected prerelease channel and remain retryable.
                     manager_for_installed.set_release_channel(Channel::Stable);
                     status_for_installed.set_text("Stable release installed — restart to apply");
                     button_for_installed.set_label("Restart now");
@@ -1337,7 +1338,7 @@ fn rollback_option(manager: Rc<ThemeManager>, install_guard: InstallGuard) -> gt
                         None => status_for_failed.set_text("Couldn't install stable release"),
                     }
                     progress_for_failed.add_css_class("error");
-                    button_for_failed.set_label("Check for stable release");
+                    button_for_failed.set_label("Try again");
                     button_for_failed.set_sensitive(true);
                     checking_for_failed.set(false);
                     // Leave the button re-checkable rather than stuck on a
@@ -1360,6 +1361,7 @@ fn rollback_option(manager: Rc<ThemeManager>, install_guard: InstallGuard) -> gt
         }
     });
 
+    run_check();
     row
 }
 
