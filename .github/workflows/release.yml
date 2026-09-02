@@ -19,6 +19,8 @@ on:
         type: choice
         options:
           - stable
+          - alpha
+          - beta
           - rc
 
 concurrency:
@@ -121,15 +123,12 @@ jobs:
           MODE: ${{ inputs.mode }}
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
-          if [[ "$MODE" == "rc" ]]; then
-            # D3: an RC build never writes a prerelease into Cargo.toml --
-            # that would poison the stable version line, and the `prepare`
-            # guard above requires a plain major.minor.patch there. Instead,
-            # prerelease identity travels via build-injected env vars that
-            # build.rs (Task 3) consumes at compile time.
+          if [[ "$MODE" != "stable" ]]; then
+            # Prerelease identity is injected at build time instead of being
+            # written into Cargo.toml, which remains the stable version line.
             {
               echo "STRATA_RELEASE_TAG=v${VERSION}"
-              echo "STRATA_BUILD_KIND=rc"
+              echo "STRATA_BUILD_KIND=${MODE}"
             } >> "$GITHUB_ENV"
             exit 0
           fi
@@ -247,11 +246,9 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          if [[ "$MODE" == "rc" ]]; then
-            # D3: an RC run tags the source commit but never pushes a
-            # version-bump commit to the default branch -- there is no
-            # manifest change to commit in the first place (see the "Set
-            # release version" step in the build job).
+          if [[ "$MODE" != "stable" ]]; then
+            # A prerelease run tags the source commit but never pushes a
+            # version-bump commit to the default branch.
             git fetch origin --tags
             if git rev-parse "v$VERSION" >/dev/null 2>&1; then
               echo "Tag v$VERSION already exists." >&2
@@ -301,10 +298,9 @@ jobs:
           MODE: ${{ inputs.mode }}
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
-          if [[ "$MODE" == "rc" ]]; then
-            # --prerelease is the server-side half of the isolation
-            # guarantee: it keeps /releases/latest pointing at the last
-            # final release, which is the endpoint a Stable user polls.
+          if [[ "$MODE" != "stable" ]]; then
+            # --prerelease keeps /releases/latest pointing at the last final
+            # release, which is the endpoint a Stable user polls.
             gh release create "v$VERSION" dist/* --verify-tag --generate-notes --prerelease --title "Strata v$VERSION"
           else
             gh release create "v$VERSION" dist/* --verify-tag --generate-notes --title "Strata v$VERSION"

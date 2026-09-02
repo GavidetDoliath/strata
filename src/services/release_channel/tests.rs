@@ -24,8 +24,13 @@ fn release(tag: &str) -> ReleaseSummary {
 }
 
 #[test]
-fn rc_ordinal_orders_within_same_core() {
+fn staged_prereleases_order_within_same_core() {
+    assert!(parse("0.5.0-alpha.2") > parse("0.5.0-alpha.1"));
+    assert!(parse("0.5.0-beta.2") > parse("0.5.0-beta.1"));
     assert!(parse("0.5.0-rc.2") > parse("0.5.0-rc.1"));
+    assert!(parse("0.5.0-alpha.9") > parse("0.5.0-nightly.20260901"));
+    assert!(parse("0.5.0-beta.1") > parse("0.5.0-alpha.9"));
+    assert!(parse("0.5.0-rc.1") > parse("0.5.0-beta.9"));
 }
 
 #[test]
@@ -88,6 +93,8 @@ fn nightly_large_suffix_parses_and_round_trips() {
 fn accepts_canonical_forms() {
     assert!(Version::parse("v0.5.0").is_some());
     assert!(Version::parse("0.5.0").is_some());
+    assert!(Version::parse("v0.5.0-alpha.1").is_some());
+    assert!(Version::parse("v0.5.0-beta.1").is_some());
     assert!(Version::parse("v0.5.0-rc.1").is_some());
     assert!(Version::parse("v0.5.0-nightly.20260901").is_some());
     assert!(Version::parse("v0.5.0-nightly.20260901.2").is_some());
@@ -97,7 +104,10 @@ fn accepts_canonical_forms() {
 fn rejects_malformed_tags() {
     assert!(Version::parse("0.5").is_none());
     assert!(Version::parse("0.5.x").is_none());
-    assert!(Version::parse("v0.5.0-beta.1").is_none());
+    assert!(Version::parse("v0.5.0-preview.1").is_none());
+    assert!(Version::parse("v0.5.0-alpha.0").is_none());
+    assert!(Version::parse("v0.5.0-beta.0").is_none());
+    assert!(Version::parse("v0.5.0-rc.0").is_none());
     assert!(Version::parse("v0.5.0-rc").is_none());
     assert!(Version::parse("v0.5.0-rc.x").is_none());
     assert!(Version::parse("").is_none());
@@ -106,8 +116,10 @@ fn rejects_malformed_tags() {
 }
 
 #[test]
-fn display_renders_canonical_rc_tag() {
-    assert_eq!(parse("v0.5.0-rc.1").to_string(), "0.5.0-rc.1");
+fn display_renders_canonical_staged_prerelease_tags() {
+    assert_eq!(parse("v0.5.0-alpha.1").to_string(), "0.5.0-alpha.1");
+    assert_eq!(parse("v0.5.0-beta.2").to_string(), "0.5.0-beta.2");
+    assert_eq!(parse("v0.5.0-rc.3").to_string(), "0.5.0-rc.3");
 }
 
 #[test]
@@ -131,7 +143,7 @@ fn display_renders_canonical_nightly_tag() {
 fn channel_round_trips() {
     assert_eq!(Channel::parse("stable"), Channel::Stable);
     assert_eq!(Channel::parse("preview"), Channel::Preview);
-    assert_eq!(Channel::parse("nightly"), Channel::Stable);
+    assert_eq!(Channel::parse("nightly"), Channel::Nightly);
     assert_eq!(Channel::parse(""), Channel::Stable);
 }
 
@@ -139,13 +151,16 @@ fn channel_round_trips() {
 fn channel_as_str_matches_persisted_values() {
     assert_eq!(Channel::Stable.as_str(), "stable");
     assert_eq!(Channel::Preview.as_str(), "preview");
+    assert_eq!(Channel::Nightly.as_str(), "nightly");
 }
 
 #[test]
 fn build_kind_labels_are_ui_facing() {
     assert_eq!(BuildKind::Stable.label(), "Stable");
-    assert_eq!(BuildKind::Rc.label(), "Release candidate");
     assert_eq!(BuildKind::Nightly.label(), "Nightly");
+    assert_eq!(BuildKind::Alpha.label(), "Alpha");
+    assert_eq!(BuildKind::Beta.label(), "Beta");
+    assert_eq!(BuildKind::Rc.label(), "Release candidate");
 }
 
 #[test]
@@ -187,14 +202,22 @@ fn stable_rejects_prerelease_flag_even_when_tag_parses_as_final() {
 }
 
 #[test]
-fn preview_accepts_both_final_and_prerelease() {
+fn preview_excludes_nightly_while_nightly_accepts_every_build_kind() {
     let final_release = release("v0.5.0");
-    let prerelease = ReleaseSummary {
+    let rc = ReleaseSummary {
         prerelease: true,
         ..release("v0.5.0-rc.1")
     };
+    let nightly = ReleaseSummary {
+        prerelease: true,
+        ..release("v0.5.0-nightly.20260901")
+    };
     assert!(is_eligible(Channel::Preview, &final_release));
-    assert!(is_eligible(Channel::Preview, &prerelease));
+    assert!(is_eligible(Channel::Preview, &rc));
+    assert!(!is_eligible(Channel::Preview, &nightly));
+    assert!(is_eligible(Channel::Nightly, &final_release));
+    assert!(is_eligible(Channel::Nightly, &rc));
+    assert!(is_eligible(Channel::Nightly, &nightly));
 }
 
 #[test]

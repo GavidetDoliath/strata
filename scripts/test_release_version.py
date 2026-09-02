@@ -20,7 +20,7 @@ from release_version import (
     VersionError,
     compute_next_version,
     ensure_tag_available,
-    next_rc_ordinal,
+    next_prerelease_ordinal,
     split_tags,
 )
 
@@ -57,9 +57,23 @@ class BumpStableTests(unittest.TestCase):
         )
 
 
-class RcOrdinalTests(unittest.TestCase):
-    """RC ordinal selection: first RC, sequential RCs, and numeric (not
-    lexicographic) ordering."""
+class PrereleaseOrdinalTests(unittest.TestCase):
+    """Ordinal selection for alpha, beta, and RC publication modes."""
+
+    def test_each_stage_has_an_independent_ordinal(self) -> None:
+        tags = ["v0.5.1-alpha.2", "v0.5.1-beta.3", "v0.5.1-rc.4"]
+        self.assertEqual(
+            compute_next_version("0.5.0", "patch", "alpha", tags),
+            "0.5.1-alpha.3",
+        )
+        self.assertEqual(
+            compute_next_version("0.5.0", "patch", "beta", tags),
+            "0.5.1-beta.4",
+        )
+        self.assertEqual(
+            compute_next_version("0.5.0", "patch", "rc", tags),
+            "0.5.1-rc.5",
+        )
 
     def test_first_rc_for_a_core_with_no_existing_rc_tags(self) -> None:
         self.assertEqual(
@@ -96,16 +110,24 @@ class RcOrdinalTests(unittest.TestCase):
 
     def test_next_rc_ordinal_numeric_ordering_directly(self) -> None:
         self.assertEqual(
-            next_rc_ordinal("0.5.1", ["v0.5.1-rc.9", "v0.5.1-rc.10"]), 11
+            next_prerelease_ordinal(
+                "0.5.1", "rc", ["v0.5.1-rc.9", "v0.5.1-rc.10"]
+            ),
+            11,
         )
         self.assertEqual(
-            next_rc_ordinal("0.5.1", ["v0.5.1-rc.10", "v0.5.1-rc.9"]), 11
+            next_prerelease_ordinal(
+                "0.5.1", "rc", ["v0.5.1-rc.10", "v0.5.1-rc.9"]
+            ),
+            11,
         )
 
     def test_non_numeric_or_mismatched_suffixes_are_ignored(self) -> None:
         self.assertEqual(
-            next_rc_ordinal(
-                "0.5.1", ["v0.5.1-rc.abc", "v0.5.1-rc.", "v0.5.2-rc.9"]
+            next_prerelease_ordinal(
+                "0.5.1",
+                "rc",
+                ["v0.5.1-rc.abc", "v0.5.1-rc.", "v0.5.2-rc.9"],
             ),
             1,
         )
@@ -115,7 +137,7 @@ class TagCollisionTests(unittest.TestCase):
     """Rejection when the computed tag already exists, mirroring the
     stable guard. RC's `N = max + 1` scan can never organically reproduce
     an existing tag, so this exercises the shared guard function directly
-    -- the same one `compute_next_version` calls for both modes -- as
+    -- the same one `compute_next_version` calls for every mode -- as
     defense in depth against a manually created or out-of-band tag."""
 
     def test_ensure_tag_available_raises_on_duplicate(self) -> None:
@@ -138,6 +160,10 @@ class InputValidationTests(unittest.TestCase):
     def test_rejects_unsupported_mode(self) -> None:
         with self.assertRaises(VersionError):
             compute_next_version("0.5.0", "patch", "nightly", [])
+
+    def test_rejects_unsupported_prerelease_kind(self) -> None:
+        with self.assertRaises(VersionError):
+            next_prerelease_ordinal("0.5.1", "preview", [])
 
 
 class SplitTagsTests(unittest.TestCase):

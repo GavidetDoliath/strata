@@ -11,13 +11,13 @@ use std::{cmp::Ordering, fmt};
 
 /// The user's persisted update-channel preference.
 ///
-/// Binary by design: the issue specifies a single opt-in toggle. This is
-/// deliberately distinct from [`BuildKind`], which describes what a given
-/// release *is* rather than what the user asked for.
+/// This is deliberately distinct from [`BuildKind`], which describes what a
+/// given release *is* rather than which stability level the user requested.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Channel {
     Stable,
     Preview,
+    Nightly,
 }
 
 impl Channel {
@@ -26,6 +26,7 @@ impl Channel {
         match self {
             Channel::Stable => "stable",
             Channel::Preview => "preview",
+            Channel::Nightly => "nightly",
         }
     }
 
@@ -37,6 +38,7 @@ impl Channel {
     pub fn parse(value: &str) -> Channel {
         match value {
             "preview" => Channel::Preview,
+            "nightly" => Channel::Nightly,
             _ => Channel::Stable,
         }
     }
@@ -45,21 +47,18 @@ impl Channel {
 /// What a given release build IS, independent of the user's channel
 /// preference.
 ///
-/// Kept separate from [`Channel`] because D2 requires RC and nightly builds
-/// to keep distinct user-facing labels even though both fall under the
-/// single "preview" preference.
+/// Kept separate from [`Channel`] because each prerelease stage retains a
+/// distinct user-facing label even when several are accepted by one channel.
 ///
 /// Declaration order pins precedence for prereleases sharing a core version
-/// (see [`Version`]'s `Ord` impl): per **D5**, `Nightly` sorts below `Rc`.
-/// This matches semver §11, which compares prerelease identifiers
-/// alphanumerically ("nightly" sorts before "rc"), so external tooling
-/// agrees with us; and once an RC has been cut for a core version, that
-/// line has stabilized, so pulling a preview user from a curated candidate
-/// onto a same-core nightly would be a stability regression.
+/// (see [`Version`]'s `Ord` impl): `Nightly < Alpha < Beta < Rc`. A final
+/// release always outranks every prerelease of its core version.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum BuildKind {
     Stable,
     Nightly,
+    Alpha,
+    Beta,
     Rc,
 }
 
@@ -68,8 +67,10 @@ impl BuildKind {
     pub fn label(self) -> &'static str {
         match self {
             BuildKind::Stable => "Stable",
-            BuildKind::Rc => "Release candidate",
             BuildKind::Nightly => "Nightly",
+            BuildKind::Alpha => "Alpha",
+            BuildKind::Beta => "Beta",
+            BuildKind::Rc => "Release candidate",
         }
     }
 }
@@ -113,6 +114,8 @@ pub struct Prerelease {
 ///
 /// ```text
 /// v?MAJOR.MINOR.PATCH
+/// v?MAJOR.MINOR.PATCH-alpha.N
+/// v?MAJOR.MINOR.PATCH-beta.N
 /// v?MAJOR.MINOR.PATCH-rc.N
 /// v?MAJOR.MINOR.PATCH-nightly.YYYYMMDD[.N]
 /// ```
@@ -149,13 +152,18 @@ fn parse_core(value: &str) -> Option<(u64, u64, u64)> {
 fn parse_prerelease(suffix: &str) -> Option<Prerelease> {
     let mut parts = suffix.split('.');
     match parts.next()? {
-        "rc" => {
+        kind @ ("alpha" | "beta" | "rc") => {
             let n = parse_strict_u64(parts.next()?)?;
-            if parts.next().is_some() {
+            if n == 0 || parts.next().is_some() {
                 return None;
             }
+            let kind = match kind {
+                "alpha" => BuildKind::Alpha,
+                "beta" => BuildKind::Beta,
+                _ => BuildKind::Rc,
+            };
             Some(Prerelease {
-                kind: BuildKind::Rc,
+                kind,
                 ordinal: Ordinal {
                     primary: n,
                     suffix: 0,
@@ -226,6 +234,8 @@ impl fmt::Display for Version {
         write!(f, "{major}.{minor}.{patch}")?;
         match &self.prerelease {
             Some(prerelease) => match prerelease.kind {
+                BuildKind::Alpha => write!(f, "-alpha.{}", prerelease.ordinal.primary),
+                BuildKind::Beta => write!(f, "-beta.{}", prerelease.ordinal.primary),
                 BuildKind::Rc => write!(f, "-rc.{}", prerelease.ordinal.primary),
                 BuildKind::Nightly => {
                     let date = prerelease.ordinal.primary;
@@ -312,15 +322,17 @@ pub struct ReleaseSummary {
 /// redundancy is a stated security requirement of issue #61: a release
 /// mislabelled on either signal alone must still be caught by the other.
 ///
-/// On [`Channel::Preview`], both final and prerelease versions are
-/// eligible; only drafts and assetless releases are rejected.
+/// [`Channel::Preview`] accepts stable, alpha, beta, and RC releases but not
+/// nightlies. [`Channel::Nightly`] accepts every recognised build kind. Drafts
+/// and assetless releases are rejected on every channel.
 pub fn is_eligible(channel: Channel, release: &ReleaseSummary) -> bool {
     if release.draft || release.download_url.is_none() {
         return false;
     }
     match channel {
         Channel::Stable => release.version.prerelease.is_none() && !release.prerelease,
-        Channel::Preview => true,
+        Channel::Preview => release.version.build_kind() != BuildKind::Nightly,
+        Channel::Nightly => true,
     }
 }
 

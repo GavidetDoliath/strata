@@ -5,16 +5,11 @@ This is the only non-trivial logic in the release workflow, extracted so it
 can be unit tested (see `scripts/test_release_version.py`) rather than living
 as an inline, untestable Python heredoc.
 
-Two publication modes are supported:
-
-- `stable` -- bump the core `major.minor.patch` version from `Cargo.toml`
-  and fail if the resulting `vMAJOR.MINOR.PATCH` tag already exists.
-- `rc` -- bump the core version the same way, then scan the existing tags
-  for `v<core>-rc.<N>` and pick `N = max + 1` (numerically, not
-  lexicographically -- `rc.10` sorts after `rc.9`), producing e.g.
-  `0.5.0-rc.1`, then `0.5.0-rc.2`. Prerelease identity travels this way
-  instead of through `Cargo.toml` (see D3 in the release-channel design
-  notes): an RC run never writes a prerelease version into the manifest.
+Stable, alpha, beta, and RC publication modes are supported. Stable bumps the
+core `major.minor.patch` version from `Cargo.toml`. Each prerelease mode bumps
+the same core, scans tags for its own `<kind>.<N>` suffix, and picks the next
+numeric ordinal. Prerelease identity stays out of `Cargo.toml` and is injected
+at build time.
 
 The script prints the resulting version (without a leading `v`) to stdout on
 success, e.g. `0.5.1` or `0.5.0-rc.1`. On failure it prints a message to
@@ -30,7 +25,7 @@ import sys
 CORE_PATTERN = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
 
 BUMP_LEVELS = ("major", "minor", "patch")
-MODES = ("stable", "rc")
+MODES = ("stable", "alpha", "beta", "rc")
 
 
 class VersionError(ValueError):
@@ -70,12 +65,13 @@ def split_tags(raw_tags: str) -> list[str]:
     return [tag for tag in raw_tags.split() if tag]
 
 
-def next_rc_ordinal(core: str, existing_tags: list[str]) -> int:
-    """Finds the next RC ordinal for `core`, comparing existing `rc.N`
-    suffixes numerically -- so `rc.10` sorts after `rc.9`, never before it
-    the way a plain string comparison would.
-    """
-    prefix = f"v{core}-rc."
+def next_prerelease_ordinal(
+    core: str, kind: str, existing_tags: list[str]
+) -> int:
+    """Finds the next numeric ordinal for one prerelease kind and core."""
+    if kind not in ("alpha", "beta", "rc"):
+        raise VersionError(f"unsupported prerelease kind: {kind!r}")
+    prefix = f"v{core}-{kind}."
     highest = 0
     for tag in existing_tags:
         if not tag.startswith(prefix):
@@ -89,9 +85,8 @@ def next_rc_ordinal(core: str, existing_tags: list[str]) -> int:
 def ensure_tag_available(tag: str, existing_tags: list[str]) -> None:
     """Fails if `tag` is already present in `existing_tags`.
 
-    Mirrors the workflow's pre-existing stable-release guard, and applies to
-    RC releases the same way: a computed tag must never silently overwrite
-    an existing one.
+    Mirrors the workflow's stable-release guard and applies to every
+    prerelease stage: a computed tag must never overwrite an existing one.
     """
     if tag in existing_tags:
         raise VersionError(f"tag {tag} already exists")
@@ -103,8 +98,8 @@ def compute_next_version(
     """Computes the next release version, without a leading `v`.
 
     `existing_tags` is every tag already published (as full tag names, e.g.
-    `v0.5.0` or `v0.5.0-rc.2`), used to reject a collision and, for `rc`, to
-    find the next ordinal.
+    `v0.5.0` or `v0.5.0-rc.2`), used to reject a collision and find the next
+    ordinal for prerelease modes.
     """
     if mode not in MODES:
         raise VersionError(f"unsupported mode: {mode!r}")
@@ -116,8 +111,8 @@ def compute_next_version(
         ensure_tag_available(tag, existing_tags)
         return core
 
-    ordinal = next_rc_ordinal(core, existing_tags)
-    version = f"{core}-rc.{ordinal}"
+    ordinal = next_prerelease_ordinal(core, mode, existing_tags)
+    version = f"{core}-{mode}.{ordinal}"
     ensure_tag_available(f"v{version}", existing_tags)
     return version
 

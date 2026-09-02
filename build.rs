@@ -27,7 +27,12 @@ fn main() {
     let build_kind = env::var("STRATA_BUILD_KIND")
         .ok()
         .and_then(|value| value.lines().next().map(str::trim).map(str::to_owned))
-        .filter(|value| matches!(value.as_str(), "stable" | "rc" | "nightly"))
+        .filter(|value| {
+            matches!(
+                value.as_str(),
+                "stable" | "alpha" | "beta" | "rc" | "nightly"
+            )
+        })
         .unwrap_or_else(|| "stable".to_owned());
     println!("cargo::rustc-env=STRATA_BUILD_KIND={build_kind}");
 }

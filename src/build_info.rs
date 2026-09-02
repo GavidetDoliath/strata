@@ -19,7 +19,8 @@ pub const AUTHOR: &str = env!("CARGO_PKG_AUTHORS");
 pub const RELEASE_TAG: &str = env!("STRATA_RELEASE_TAG");
 
 /// The build kind this binary was published as, as the raw string
-/// `build.rs` injected: `"stable"`, `"rc"`, or `"nightly"`.
+/// `build.rs` injected: `"stable"`, `"alpha"`, `"beta"`, `"rc"`, or
+/// `"nightly"`.
 ///
 /// Defaults to `"stable"` when `STRATA_BUILD_KIND` is unset, empty, or not
 /// one of those three values. Prefer [`build_kind`] over reading this
@@ -34,8 +35,10 @@ pub const BUILD_KIND: &str = env!("STRATA_BUILD_KIND");
 /// ordinary stable build, never as a preview.
 pub fn build_kind() -> BuildKind {
     match BUILD_KIND {
-        "rc" => BuildKind::Rc,
         "nightly" => BuildKind::Nightly,
+        "alpha" => BuildKind::Alpha,
+        "beta" => BuildKind::Beta,
+        "rc" => BuildKind::Rc,
         _ => BuildKind::Stable,
     }
 }

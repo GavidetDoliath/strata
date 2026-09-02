@@ -273,9 +273,22 @@ fn preview_release_channel_round_trips_through_toml() {
 }
 
 #[test]
+fn nightly_release_channel_round_trips_through_toml() {
+    let preferences = Preferences {
+        release_channel: "nightly".to_owned(),
+        ..Preferences::default()
+    };
+    let serialized = toml::to_string(&preferences).expect("preferences should serialize");
+    let restored: Preferences =
+        toml::from_str(&serialized).expect("preferences should deserialize");
+    assert_eq!(restored.release_channel, "nightly");
+    assert_eq!(Channel::parse(&restored.release_channel), Channel::Nightly);
+}
+
+#[test]
 fn unknown_release_channel_value_parses_to_stable() {
     let preferences = Preferences {
-        release_channel: "nightly-experiment".to_owned(),
+        release_channel: "experimental".to_owned(),
         ..Preferences::default()
     };
     assert_eq!(

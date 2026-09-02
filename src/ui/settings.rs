@@ -504,40 +504,49 @@ fn updates_page(
     scrollable_page(&preferences, None)
 }
 
-/// The title and description shown for a given [`Channel`], using the
-/// exact language issue #61 specifies for each option.
-/// The release-channel row's copy. Static: the switch enables preview builds,
-/// exactly as every other [`settings_option`] row enables the thing it names.
-/// A label that changed with the switch state read as though the switch were
-/// disabling whatever it currently said.
-const PREVIEW_CHANNEL_TITLE: &str = "Nightly / preview builds";
-const PREVIEW_CHANNEL_DESCRIPTION: &str =
-    "Receive release candidates and nightly builds. These may be unstable.";
+const RELEASE_CHANNEL_TITLE: &str = "Release channel";
+const RELEASE_CHANNEL_DESCRIPTION: &str = "Preview receives alpha, beta, and release-candidate builds. Nightly also receives daily development builds.";
 
-/// The release-channel selector row: one switch that opts into
-/// [`Channel::Preview`], built from [`settings_option`] so it is structurally
-/// identical to the rows beside it. Off means [`Channel::Stable`].
-///
-/// Toggling immediately persists the choice and re-runs `run_check` so the
-/// issue's "opting in checks the preview feed straight away" requirement holds
-/// without waiting for the next automatic check.
+/// A three-way release-channel selector. Changing it persists immediately and
+/// starts a fresh check, so an offer from the previously selected channel is
+/// superseded without waiting for the next automatic check.
 fn channel_option(manager: Rc<ThemeManager>, run_check: Rc<dyn Fn()>) -> gtk::Box {
-    let (row, toggle) = settings_option(
-        PREVIEW_CHANNEL_TITLE,
-        PREVIEW_CHANNEL_DESCRIPTION,
-        manager.release_channel() == Channel::Preview,
-    );
+    let row = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    row.add_css_class("settings-option");
 
-    toggle.connect_active_notify(move |switch| {
-        let channel = if switch.is_active() {
-            Channel::Preview
-        } else {
-            Channel::Stable
-        };
-        manager.set_release_channel(channel);
-        run_check();
-    });
+    let copy = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    let title = gtk::Label::new(Some(RELEASE_CHANNEL_TITLE));
+    title.set_xalign(0.0);
+    title.add_css_class("settings-option-title");
+    let description = gtk::Label::new(Some(RELEASE_CHANNEL_DESCRIPTION));
+    description.set_xalign(0.0);
+    description.set_wrap(true);
+    description.add_css_class("settings-option-description");
+    copy.append(&title);
+    copy.append(&description);
+    row.append(&copy);
 
+    let selected = match manager.release_channel() {
+        Channel::Stable => 0,
+        Channel::Preview => 1,
+        Channel::Nightly => 2,
+    };
+    let (control, buttons) = segmented_control(&["Stable", "Preview", "Nightly"], selected);
+    for (button, channel) in
+        buttons
+            .into_iter()
+            .zip([Channel::Stable, Channel::Preview, Channel::Nightly])
+    {
+        let manager = manager.clone();
+        let run_check = run_check.clone();
+        button.connect_active_notify(move |button| {
+            if button.is_active() {
+                manager.set_release_channel(channel);
+                run_check();
+            }
+        });
+    }
+    row.append(&control);
     row
 }
 
@@ -768,7 +777,11 @@ struct PendingInstall {
 /// makes the preference authoritative regardless of how many views cached
 /// an offer under the old one.
 fn offer_still_eligible(channel: Channel, kind: BuildKind) -> bool {
-    channel == Channel::Preview || kind == BuildKind::Stable
+    match channel {
+        Channel::Stable => kind == BuildKind::Stable,
+        Channel::Preview => kind != BuildKind::Nightly,
+        Channel::Nightly => true,
+    }
 }
 
 fn update_check_row(

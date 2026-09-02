@@ -250,9 +250,9 @@ Custom themes are stored as shareable TOML files in `~/.config/strata/themes/`. 
 
 Strata defaults to the **Stable** channel: only final tagged releases are ever offered, and a Stable install never receives, sees, or is notified about a prerelease.
 
-To try upcoming changes early, turn on **Nightly / preview builds** in **Settings → Updates**. A preview install is then offered whichever build is newest — a release candidate, or an ordinary final release once one ships for that line — and the update dialog and release notes always visibly label a prerelease so it is never mistaken for a stable build.
+To try upcoming changes early, choose a channel in **Settings → Updates**. **Preview** receives curated alpha, beta, and release-candidate builds but excludes nightlies. **Nightly** receives every recognised prerelease, including daily development builds. The update dialog and release notes always identify the exact build kind.
 
-Turning the switch back off stops offering prereleases from that point on; it does not touch a preview build already installed. To replace one, use **Return to stable** on the same page. It appears whenever the running build itself is not stable, independent of the switch, and installs the newest stable release while preserving your preferences and data.
+Changing back to Stable stops offering prereleases from that point on; it does not touch a prerelease already installed. To replace one, use **Return to stable** on the same page. It appears whenever the running build itself is not stable and installs the newest stable release while preserving your preferences and data.
 
 See [Releasing](docs/releasing.md) for the tag grammar these channels rely on and, for maintainers, how a release candidate is cut and promoted.
 

@@ -293,7 +293,7 @@ fn select_rollback(installed: &Version, releases: &[ReleaseSummary]) -> Rollback
 fn fetch_update(channel: Channel, installed: &Version) -> UpdateCheck {
     let releases = match channel {
         Channel::Stable => fetch_stable().map(|release| release.into_iter().collect::<Vec<_>>()),
-        Channel::Preview => fetch_preview(),
+        Channel::Preview | Channel::Nightly => fetch_preview(),
     };
     match releases {
         Ok(releases) => {

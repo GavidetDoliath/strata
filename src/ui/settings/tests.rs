@@ -6,7 +6,7 @@ use crate::services::{BuildKind, Channel, ReleaseMetadata, UpdateCheck, Version}
 
 use super::{
     COMPACT_NAVIGATION_BREAKPOINT, DIALOG_HEIGHT, DIALOG_MARGIN, DIALOG_WIDTH,
-    PREVIEW_CHANNEL_DESCRIPTION, PREVIEW_CHANNEL_TITLE, install_guard, installed_version_status,
+    RELEASE_CHANNEL_DESCRIPTION, RELEASE_CHANNEL_TITLE, install_guard, installed_version_status,
     is_stale_check, offer_still_eligible, responsive_dialog_size, shows_available_release_notes,
     theme_background_is_light, theme_name_matches, uses_compact_navigation,
 };
@@ -93,14 +93,11 @@ fn available_notes_are_shown_only_for_a_newer_release() {
 }
 
 #[test]
-fn preview_channel_copy_names_what_the_switch_enables() {
-    // The switch enables preview builds, so the label must name preview builds
-    // and must not change with the switch state -- a label that flipped to
-    // "Stable" when off read as though the switch disabled stable releases.
-    assert_eq!(PREVIEW_CHANNEL_TITLE, "Nightly / preview builds");
+fn release_channel_copy_distinguishes_preview_from_nightly() {
+    assert_eq!(RELEASE_CHANNEL_TITLE, "Release channel");
     assert_eq!(
-        PREVIEW_CHANNEL_DESCRIPTION,
-        "Receive release candidates and nightly builds. These may be unstable."
+        RELEASE_CHANNEL_DESCRIPTION,
+        "Preview receives alpha, beta, and release-candidate builds. Nightly also receives daily development builds."
     );
 }
 
@@ -129,14 +126,18 @@ fn a_cached_prerelease_offer_stops_being_installable_once_the_channel_is_stable(
     // button must refuse it.
     assert!(!offer_still_eligible(Channel::Stable, BuildKind::Rc));
     assert!(!offer_still_eligible(Channel::Stable, BuildKind::Nightly));
+    assert!(!offer_still_eligible(Channel::Preview, BuildKind::Nightly));
 }
 
 #[test]
 fn a_cached_offer_stays_installable_when_the_channel_still_allows_it() {
     assert!(offer_still_eligible(Channel::Stable, BuildKind::Stable));
     assert!(offer_still_eligible(Channel::Preview, BuildKind::Stable));
+    assert!(offer_still_eligible(Channel::Preview, BuildKind::Alpha));
+    assert!(offer_still_eligible(Channel::Preview, BuildKind::Beta));
     assert!(offer_still_eligible(Channel::Preview, BuildKind::Rc));
-    assert!(offer_still_eligible(Channel::Preview, BuildKind::Nightly));
+    assert!(offer_still_eligible(Channel::Nightly, BuildKind::Nightly));
+    assert!(offer_still_eligible(Channel::Nightly, BuildKind::Rc));
 }
 
 #[test]
