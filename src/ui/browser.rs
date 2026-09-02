@@ -2,6 +2,7 @@
 
 use std::{
     cell::{Cell, RefCell},
+    collections::HashSet,
     future::Future,
     path::Path,
     pin::Pin,
@@ -113,17 +114,22 @@ struct PeekView {
     spinner: gtk::Spinner,
 }
 
+pub(super) fn loading_skeleton() -> gtk::Box {
+    let skeleton = gtk::Box::new(gtk::Orientation::Vertical, 9);
+    skeleton.add_css_class("loading-skeleton");
+    for width in [168, 124, 192, 148, 176, 112] {
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        row.add_css_class("skeleton-row");
+        row.set_size_request(width, 10);
+        row.set_halign(gtk::Align::Start);
+        skeleton.append(&row);
+    }
+    skeleton
+}
+
 impl LoadPresentation {
     fn new(content: &impl IsA<gtk::Widget>, retry: Option<gtk::Button>) -> Self {
-        let skeleton = gtk::Box::new(gtk::Orientation::Vertical, 9);
-        skeleton.add_css_class("loading-skeleton");
-        for width in [168, 124, 192, 148, 176, 112] {
-            let row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-            row.add_css_class("skeleton-row");
-            row.set_size_request(width, 10);
-            row.set_halign(gtk::Align::Start);
-            skeleton.append(&row);
-        }
+        let skeleton = loading_skeleton();
 
         let feedback = gtk::Box::new(gtk::Orientation::Vertical, 8);
         feedback.add_css_class("directory-feedback");
@@ -1045,7 +1051,6 @@ impl ViewState {
         sources: Vec<Location>,
         move_sources: bool,
     ) {
-        let clear_cut = move_sources && same_locations(&sources, &self.cut_locations.borrow());
         let mut accepted = Vec::new();
         let mut collisions = Vec::new();
         for source in sources {
@@ -1058,13 +1063,7 @@ impl ViewState {
                 });
             }
         }
-        self.resolve_transfer_collisions(
-            destination,
-            collisions,
-            accepted,
-            move_sources,
-            clear_cut,
-        );
+        self.resolve_transfer_collisions(destination, collisions, accepted, move_sources);
     }
 
     fn resolve_transfer_collisions(
@@ -1073,17 +1072,8 @@ impl ViewState {
         mut collisions: Vec<Location>,
         accepted: Vec<PasteItem>,
         move_sources: bool,
-        clear_cut: bool,
     ) {
         if collisions.is_empty() {
-            if clear_cut {
-                self.complete_cut_transfer(
-                    &accepted
-                        .iter()
-                        .map(|item| item.source.clone())
-                        .collect::<Vec<_>>(),
-                );
-            }
             self.browser.transfer(destination, accepted, move_sources);
             return;
         }
@@ -1155,7 +1145,6 @@ impl ViewState {
                 },
                 skipped_accepted.clone(),
                 move_sources,
-                clear_cut,
             );
         });
 
@@ -1185,7 +1174,6 @@ impl ViewState {
                 remaining,
                 accepted,
                 move_sources,
-                clear_cut,
             );
         });
 
@@ -1233,9 +1221,7 @@ impl ViewState {
     }
 
     fn complete_cut_transfer(&self, transferred: &[Location]) {
-        self.cut_locations
-            .borrow_mut()
-            .retain(|location| !transferred.contains(location));
+        retain_untransferred(&mut self.cut_locations.borrow_mut(), transferred);
         let remaining = self.cut_locations.borrow().clone();
         if remaining.is_empty() {
             if let Some(display) = gtk::gdk::Display::default() {
@@ -1252,6 +1238,7 @@ impl ViewState {
     fn refresh_cut_rows(&self) {
         let cut = self.cut_locations.borrow();
         self.mode_views.borrow().set_cut_locations(&cut);
+        let cut_lookup: HashSet<_> = cut.iter().collect();
         for (depth, column) in self.columns.borrow().iter().enumerate() {
             column.bound_rows.borrow_mut().retain(|bound| {
                 let (Some(item), Some(row)) = (bound.item.upgrade(), bound.row.upgrade()) else {
@@ -1263,7 +1250,7 @@ impl ViewState {
                     item.position(),
                 )
                 .and_then(|position| self.browser.entry_at(depth, position))
-                .is_some_and(|entry| cut.contains(&entry.location));
+                .is_some_and(|entry| cut_lookup.contains(&entry.location));
                 set_cut_path_style(&row, is_cut);
                 true
             });
@@ -3474,7 +3461,7 @@ impl ViewState {
                     .map(|insertion| insertion.entries.len())
                     .sum();
                 if let Some(column) = self.columns.borrow().get(depth).cloned() {
-                    if entry_count > 0 {
+                    if entry_count > 0 && !column.spinner.is_spinning() {
                         column.presentation.show_content();
                     }
                     for insertion in insertions {
@@ -3556,6 +3543,9 @@ impl ViewState {
             }
             BrowserEvent::ColumnReloaded { depth } => {
                 if let Some(column) = self.columns.borrow().get(depth) {
+                    column.syncing_selection.set(true);
+                    column.selection.set_model(None::<&gio::ListModel>);
+                    column.filtered_model.set_model(None::<&gio::ListModel>);
                     column.model.splice(0, column.model.n_items(), &[]);
                     column.entry_count.set(0);
                     set_filter_placeholder(column, 0);
@@ -3566,6 +3556,11 @@ impl ViewState {
             }
             BrowserEvent::LoadFinished { depth } => {
                 if let Some(column) = self.columns.borrow().get(depth) {
+                    if column.selection.model().is_none() {
+                        column.filtered_model.set_model(Some(&column.model));
+                        column.selection.set_model(Some(&column.filtered_model));
+                        column.syncing_selection.set(false);
+                    }
                     column.spinner.stop();
                     column.spinner.set_visible(false);
                     let count = column.entry_count.get();
@@ -3590,6 +3585,11 @@ impl ViewState {
             }
             BrowserEvent::LoadFailed { depth, message } => {
                 if let Some(column) = self.columns.borrow().get(depth) {
+                    if column.selection.model().is_none() {
+                        column.filtered_model.set_model(Some(&column.model));
+                        column.selection.set_model(Some(&column.filtered_model));
+                        column.syncing_selection.set(false);
+                    }
                     column.spinner.stop();
                     column.spinner.set_visible(false);
                     column
@@ -3693,13 +3693,40 @@ impl ViewState {
                     rename.field.grab_focus();
                 }
             }
+            BrowserEvent::TransferStarted { total, moving } => {
+                let browser = self.browser.clone();
+                self.show_file_operation_progress(
+                    total,
+                    if moving {
+                        crate::assets::icons::FOLDER
+                    } else {
+                        crate::assets::icons::COPY
+                    },
+                    if moving {
+                        "Moving items"
+                    } else {
+                        "Copying items"
+                    },
+                    "Cancelling will not undo completed changes",
+                    Rc::new(move || browser.cancel_file_operation()),
+                );
+            }
+            BrowserEvent::TransferProgress { completed, total } => {
+                self.update_delete_progress(completed, total);
+            }
+            BrowserEvent::TransferFinished { moved_locations } => {
+                if !moved_locations.is_empty() {
+                    self.complete_cut_transfer(&moved_locations);
+                }
+                self.dismiss_delete_progress();
+            }
             BrowserEvent::DeletionStarted { total } => {
                 let browser = self.browser.clone();
                 self.show_file_operation_progress(
                     total,
                     crate::assets::icons::TRASH,
                     "Deleting items",
-                    "This may take a moment",
+                    "Cancelling will not undo completed changes",
                     Rc::new(move || browser.cancel_file_operation()),
                 );
             }
@@ -3713,7 +3740,7 @@ impl ViewState {
                     total,
                     crate::assets::icons::FOLDER,
                     "Restoring items",
-                    "Items are being returned to their original locations",
+                    "Cancelling will not undo completed changes",
                     Rc::new(move || browser.cancel_file_operation()),
                 );
             }
@@ -3735,6 +3762,26 @@ impl ViewState {
             }
             BrowserEvent::OperationCompletedWithErrors { message } => {
                 show_error_dialog(&self.overlay, "Completed with errors", &message);
+            }
+            BrowserEvent::OperationCancelled {
+                completed,
+                failed,
+                not_attempted,
+                affected_locations,
+            } => {
+                let message = format!(
+                    "{} completed, {} failed, and {} not attempted.\n\nCompleted changes were not reverted.",
+                    item_count_label(completed),
+                    item_count_label(failed),
+                    item_count_label(not_attempted),
+                );
+                let browser = self.browser.clone();
+                show_error_dialog_after_close(
+                    &self.overlay,
+                    "Operation cancelled",
+                    &message,
+                    Rc::new(move || browser.refresh_after_cancellation(&affected_locations)),
+                );
             }
             BrowserEvent::NavigationRejected {
                 parent_depth,
@@ -3965,15 +4012,14 @@ impl ViewState {
                 return;
             }
             let filtered_positions = bitset_positions(&selection.selection());
-            let source_positions: Vec<_> = filtered_positions
+            let mapped_positions = source_positions_for_filtered(
+                &source_for_selection,
+                &filtered_for_selection,
+                &filtered_positions,
+            );
+            let source_positions: Vec<_> = mapped_positions
                 .iter()
-                .filter_map(|position| {
-                    source_position_for_filtered(
-                        &source_for_selection,
-                        &filtered_for_selection,
-                        *position,
-                    )
-                })
+                .map(|(_, source_position)| *source_position)
                 .collect();
             let changed_end = position.saturating_add(count);
             let focused = filtered_positions
@@ -3989,11 +4035,9 @@ impl ViewState {
                 .or_else(|| filtered_positions.last().copied());
             focused_filtered_changed.set(focused);
             let focused_source = focused.and_then(|position| {
-                source_position_for_filtered(
-                    &source_for_selection,
-                    &filtered_for_selection,
-                    position,
-                )
+                mapped_positions
+                    .iter()
+                    .find_map(|(filtered, source)| (*filtered == position).then_some(*source))
             });
             if let Some(browser) = weak_browser.upgrade() {
                 browser.set_selection(depth, &source_positions, focused_source);
@@ -5006,14 +5050,34 @@ fn source_position_for_filtered(
     filtered: &gtk::FilterListModel,
     filtered_position: u32,
 ) -> Option<usize> {
-    let item = filtered.item(filtered_position)?;
-    (0..source.n_items())
-        .find(|position| {
-            source
-                .item(*position)
-                .is_some_and(|candidate| candidate == item)
+    source_positions_for_filtered(source, filtered, &[filtered_position])
+        .first()
+        .map(|(_, source)| *source)
+}
+
+fn source_positions_for_filtered(
+    source: &gtk::StringList,
+    filtered: &gtk::FilterListModel,
+    filtered_positions: &[u32],
+) -> Vec<(u32, usize)> {
+    let mut source_position = 0;
+    filtered_positions
+        .iter()
+        .filter_map(|filtered_position| {
+            let item = filtered.item(*filtered_position)?;
+            while source_position < source.n_items() {
+                let candidate_position = source_position;
+                source_position += 1;
+                if source
+                    .item(candidate_position)
+                    .is_some_and(|candidate| candidate == item)
+                {
+                    return Some((*filtered_position, candidate_position as usize));
+                }
+            }
+            None
         })
-        .map(|position| position as usize)
+        .collect()
 }
 
 fn set_column_selection(column: &ColumnView, position: u32) {
@@ -5183,6 +5247,8 @@ pub(super) fn install_folder_context_menu(
 pub(super) type ContextPickPosition = Rc<dyn Fn(&gtk::Widget) -> Option<u32>>;
 pub(super) type ContextSourcePosition = Rc<dyn Fn(u32) -> Option<usize>>;
 
+const ITEM_CONTEXT_SUMMARY_MAX_CHARS: i32 = 60;
+
 pub(super) fn install_item_context_menu(
     state: &Rc<ViewState>,
     widget: &gtk::Widget,
@@ -5203,10 +5269,12 @@ pub(super) fn install_item_context_menu(
     let heading = gtk::Label::new(None);
     heading.add_css_class("item-context-title");
     heading.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    heading.set_max_width_chars(ITEM_CONTEXT_SUMMARY_MAX_CHARS);
     heading.set_xalign(0.0);
     let summary = gtk::Label::new(None);
     summary.add_css_class("item-context-summary");
     summary.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    summary.set_max_width_chars(ITEM_CONTEXT_SUMMARY_MAX_CHARS);
     summary.set_xalign(0.0);
     header.append(&heading);
     header.append(&summary);
@@ -5448,13 +5516,6 @@ pub(super) fn install_item_context_menu(
         if !selection.is_selected(filtered_position) {
             selection.select_item(filtered_position, true);
         }
-        let selected_positions = bitset_positions(&selection.selection())
-            .into_iter()
-            .filter_map(|position| source_position(position))
-            .collect::<Vec<_>>();
-        state
-            .browser
-            .set_selection(depth, &selected_positions, Some(resolved_position));
         target.replace(Some((resolved_position, entry.clone())));
         let entries = state.browser.selected_entries();
         preview.set_visible(entry_supports_quick_preview(&entry));
@@ -5776,6 +5837,11 @@ fn selected_items_summary(entries: &[FileEntry]) -> String {
         .join(", ");
     if entries.len() > 3 {
         names.push_str(", …");
+    }
+    let max_chars = ITEM_CONTEXT_SUMMARY_MAX_CHARS as usize;
+    if names.chars().count() > max_chars {
+        names = names.chars().take(max_chars - 1).collect();
+        names.push('…');
     }
     names
 }
@@ -6338,9 +6404,17 @@ fn new_folder_destination_depth(
 }
 
 fn same_locations(left: &[Location], right: &[Location]) -> bool {
-    !left.is_empty()
-        && left.len() == right.len()
-        && left.iter().all(|location| right.contains(location))
+    if left.is_empty() || left.len() != right.len() {
+        return false;
+    }
+    let left: HashSet<_> = left.iter().collect();
+    let right: HashSet<_> = right.iter().collect();
+    left.len() == right.len() && left == right
+}
+
+fn retain_untransferred(cut: &mut Vec<Location>, transferred: &[Location]) {
+    let transferred: HashSet<_> = transferred.iter().collect();
+    cut.retain(|location| !transferred.contains(location));
 }
 
 fn item_context_option(icon: &str, label: &str, accelerator: &str) -> gtk::Button {
@@ -7593,12 +7667,22 @@ pub(super) fn open_location(location: &Location, parent: &impl IsA<gtk::Widget>)
 }
 
 pub(super) fn show_error_dialog(parent: &impl IsA<gtk::Widget>, message: &str, detail: &str) {
+    show_error_dialog_after_close(parent, message, detail, Rc::new(|| {}));
+}
+
+fn show_error_dialog_after_close(
+    parent: &impl IsA<gtk::Widget>,
+    message: &str,
+    detail: &str,
+    on_close: Rc<dyn Fn()>,
+) {
     let Some(window_overlay) = parent
         .root()
         .and_downcast::<gtk::Window>()
         .and_then(|window| window.child())
         .and_downcast::<gtk::Overlay>()
     else {
+        on_close();
         return;
     };
     let blurred_root = window_overlay.child().and_downcast::<BlurBin>();
@@ -7630,8 +7714,14 @@ pub(super) fn show_error_dialog(parent: &impl IsA<gtk::Widget>, message: &str, d
     let close_layer = layer.clone();
     let close_overlay = window_overlay.clone();
     let close_root = blurred_root.clone();
+    let dismissed = Rc::new(Cell::new(false));
     let dismiss = move || {
+        if dismissed.replace(true) {
+            return;
+        }
         dismiss_modal_layer(&close_layer, &close_overlay, close_root.as_ref());
+        let on_close = on_close.clone();
+        glib::timeout_add_local_once(Duration::from_millis(250), move || on_close());
     };
     let dismiss = Rc::new(dismiss);
     let clicked_dismiss = dismiss.clone();
