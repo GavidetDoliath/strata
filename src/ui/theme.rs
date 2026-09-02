@@ -12,7 +12,10 @@ use gtk::{gdk, gio, glib, prelude::*};
 use serde::{Deserialize, Serialize};
 use sourceview5::prelude::BufferExt as _;
 
-use crate::model::{SortDirection, SortKey, ViewPreferences};
+use crate::{
+    model::{SortDirection, SortKey, ViewPreferences},
+    services::Channel,
+};
 
 thread_local! {
     static SHARED_MANAGER: RefCell<std::rc::Weak<ThemeManager>> = const { RefCell::new(std::rc::Weak::new()) };
@@ -82,6 +85,8 @@ struct Preferences {
     sort_direction: String,
     #[serde(default = "default_enabled")]
     check_for_updates: bool,
+    #[serde(default = "default_release_channel")]
+    release_channel: String,
 }
 
 impl Default for Preferences {
@@ -100,12 +105,17 @@ impl Default for Preferences {
             sort_key: default_sort_key(),
             sort_direction: default_sort_direction(),
             check_for_updates: true,
+            release_channel: default_release_channel(),
         }
     }
 }
 
 fn default_enabled() -> bool {
     true
+}
+
+fn default_release_channel() -> String {
+    "stable".to_owned()
 }
 
 fn default_browser_mode() -> String {
@@ -234,6 +244,15 @@ impl ThemeManager {
 
     pub fn set_checks_for_updates(&self, enabled: bool) {
         self.preferences.borrow_mut().check_for_updates = enabled;
+        self.save_preferences();
+    }
+
+    pub fn release_channel(&self) -> Channel {
+        Channel::parse(&self.preferences.borrow().release_channel)
+    }
+
+    pub fn set_release_channel(&self, channel: Channel) {
+        self.preferences.borrow_mut().release_channel = channel.as_str().to_owned();
         self.save_preferences();
     }
 
