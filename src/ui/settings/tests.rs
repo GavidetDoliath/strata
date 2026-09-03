@@ -9,7 +9,9 @@ use super::{
     RELEASE_CHANNEL_DESCRIPTION, RELEASE_CHANNEL_TITLE, install_guard, installed_version_status,
     is_stale_check, offer_still_eligible, responsive_dialog_size, shows_available_release_notes,
     theme_background_is_light, theme_name_matches, uses_compact_navigation,
+    video_preview_backend_label, video_preview_control_state,
 };
+use crate::sandbox::MediaPreviewBackend;
 
 #[test]
 fn a_checks_result_is_current_only_for_the_generation_it_was_issued_under() {
@@ -93,12 +95,33 @@ fn available_notes_are_shown_only_for_a_newer_release() {
 }
 
 #[test]
+fn video_preview_backend_selector_labels_all_options() {
+    for (backend, label) in [
+        (MediaPreviewBackend::Automatic, "Automatic"),
+        (MediaPreviewBackend::VaApi, "VA-API"),
+        (MediaPreviewBackend::Vulkan, "Vulkan"),
+    ] {
+        assert_eq!(video_preview_backend_label(backend), label);
+    }
+    assert_eq!(
+        video_preview_backend_label(MediaPreviewBackend::Software),
+        "Automatic"
+    );
+}
+
+#[test]
 fn release_channel_copy_distinguishes_preview_from_nightly() {
     assert_eq!(RELEASE_CHANNEL_TITLE, "Release channel");
     assert_eq!(
         RELEASE_CHANNEL_DESCRIPTION,
         "Preview receives alpha, beta, and release-candidate builds. Nightly also receives daily development builds."
     );
+}
+
+#[test]
+fn video_preview_controls_follow_enabled_state() {
+    assert_eq!(video_preview_control_state(true), (true, true, true));
+    assert_eq!(video_preview_control_state(false), (false, true, false));
 }
 
 #[test]
