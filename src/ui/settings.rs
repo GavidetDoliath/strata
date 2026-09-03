@@ -30,8 +30,14 @@ use super::{
 };
 
 type ThemeCards = Rc<RefCell<Vec<(String, gtk::Button, gtk::Image)>>>;
-type UpdateCheckRow = (gtk::Box, Rc<dyn Fn(bool)>, (gtk::Box, gtk::Button));
 pub(super) type UpdateNoticeHandler = Rc<dyn Fn(Option<(ReleaseMetadata, String, UpdateMethod)>)>;
+
+struct UpdateCheckRow {
+    row: gtk::Box,
+    run_check: Rc<dyn Fn(bool)>,
+    responsive_action: (gtk::Box, gtk::Button),
+    install_underway: Rc<dyn Fn() -> bool>,
+}
 
 /// Shared "an install is running" guard across the update row and update
 /// dialog, the two places [`services::install_update`] is called. Without one
@@ -521,7 +527,12 @@ fn updates_page(
         "Check for updates to see the latest release notes.",
     );
     let update_method = services::update_method();
-    let (update_row, run_check, responsive_action) = update_check_row(
+    let UpdateCheckRow {
+        row: update_row,
+        run_check,
+        responsive_action,
+        install_underway,
+    } = update_check_row(
         manager.clone(),
         update_notice.clone(),
         available_notes.clone(),
@@ -545,7 +556,7 @@ fn updates_page(
     );
     preferences.append(&auto_check_row);
 
-    let channel_row = channel_option(manager.clone(), run_check.clone());
+    let (channel_row, sync_channel_selection) = channel_option(manager.clone());
     channel_row.set_sensitive(auto_check_enabled);
     channel_row.set_visible(!update_method.is_package_managed());
     preferences.append(&channel_row);
@@ -578,16 +589,24 @@ fn updates_page(
         run_check(false);
     }
 
-    (scrollable_page(&preferences, None), vec![responsive_action])
+    let page = scrollable_page(&preferences, None);
+    let broadcast_check = run_check.clone();
+    manager.on_release_channel_changed(
+        &page,
+        Rc::new(move || {
+            sync_channel_selection();
+            if !install_underway() {
+                broadcast_check(false);
+            }
+        }),
+    );
+    (page, vec![responsive_action])
 }
 
 const RELEASE_CHANNEL_TITLE: &str = "Release channel";
 const RELEASE_CHANNEL_DESCRIPTION: &str = "Preview receives alpha, beta, and release-candidate builds. Nightly also receives daily development builds.";
 
-/// A three-way release-channel selector. Changing it persists immediately and
-/// starts a fresh check, so an offer from the previously selected channel is
-/// superseded without waiting for the next automatic check.
-fn channel_option(manager: Rc<ThemeManager>, run_check: Rc<dyn Fn(bool)>) -> gtk::Box {
+fn channel_option(manager: Rc<ThemeManager>) -> (gtk::Box, Rc<dyn Fn()>) {
     let row = gtk::Box::new(gtk::Orientation::Vertical, 12);
     row.add_css_class("settings-option");
 
@@ -603,28 +622,48 @@ fn channel_option(manager: Rc<ThemeManager>, run_check: Rc<dyn Fn(bool)>) -> gtk
     copy.append(&description);
     row.append(&copy);
 
-    let selected = match manager.release_channel() {
-        Channel::Stable => 0,
-        Channel::Preview => 1,
-        Channel::Nightly => 2,
-    };
-    let (control, buttons) = segmented_control(&["Stable", "Preview", "Nightly"], selected);
-    for (button, channel) in
-        buttons
-            .into_iter()
-            .zip([Channel::Stable, Channel::Preview, Channel::Nightly])
-    {
+    let (control, buttons) = segmented_control(
+        &["Stable", "Preview", "Nightly"],
+        channel_index(manager.release_channel()),
+    );
+    let weak_buttons: Vec<glib::WeakRef<gtk::ToggleButton>> =
+        buttons.iter().map(|button| button.downgrade()).collect();
+    for (button, channel) in buttons.into_iter().zip(CHANNEL_ORDER) {
         let manager = manager.clone();
-        let run_check = run_check.clone();
         button.connect_active_notify(move |button| {
             if button.is_active() {
                 manager.set_release_channel(channel);
-                run_check(false);
             }
         });
     }
     row.append(&control);
-    row
+
+    let sync = {
+        let manager = manager.clone();
+        Rc::new(move || {
+            let Some(button) = weak_buttons
+                .get(channel_index(manager.release_channel()))
+                .and_then(glib::WeakRef::upgrade)
+            else {
+                return;
+            };
+            if !button.is_active() {
+                button.set_active(true);
+            }
+        }) as Rc<dyn Fn()>
+    };
+
+    (row, sync)
+}
+
+const CHANNEL_ORDER: [Channel; 3] = [Channel::Stable, Channel::Preview, Channel::Nightly];
+
+fn channel_index(channel: Channel) -> usize {
+    match channel {
+        Channel::Stable => 0,
+        Channel::Preview => 1,
+        Channel::Nightly => 2,
+    }
 }
 
 fn release_notes_label() -> gtk::Label {
@@ -919,6 +958,12 @@ fn update_check_row(
     let pending_download = Rc::new(RefCell::new(None::<PendingInstall>));
     // Set once an install finishes, so the next click restarts instead of re-checking.
     let installed = Rc::new(Cell::new(false));
+    let installing = Rc::new(Cell::new(false));
+    let install_underway: Rc<dyn Fn() -> bool> = Rc::new({
+        let installed = installed.clone();
+        let installing = installing.clone();
+        move || installed.get() || installing.get()
+    });
     let managed_update_available = Rc::new(Cell::new(false));
     // The generation of the most recently started check. Each call to
     // `run_check` captures the next value and compares against this when its
@@ -1107,6 +1152,7 @@ fn update_check_row(
             if checking.replace(true) {
                 return;
             }
+            installing.set(true);
             status.set_text(if returns_to_stable {
                 "Downloading stable release…"
             } else {
@@ -1122,6 +1168,7 @@ fn update_check_row(
             let status_for_installed = status.clone();
             let button_for_installed = button.clone();
             let installed_for_installed = installed.clone();
+            let installing_for_failed = installing.clone();
             let checking_for_failed = checking.clone();
             let status_for_failed = status.clone();
             let button_for_failed = button.clone();
@@ -1153,6 +1200,7 @@ fn update_check_row(
                     button_for_failed.set_label("Check now");
                     button_for_failed.set_sensitive(true);
                     checking_for_failed.set(false);
+                    installing_for_failed.set(false);
                 },
             );
             if let Err(request) = started {
@@ -1169,6 +1217,7 @@ fn update_check_row(
                 });
                 button.set_sensitive(true);
                 checking.set(false);
+                installing.set(false);
                 *pending_download.borrow_mut() = Some(PendingInstall {
                     kind: offered_kind,
                     returns_to_stable,
@@ -1179,7 +1228,12 @@ fn update_check_row(
             clicked_check(true);
         }
     });
-    (row, run_check, (summary, button))
+    UpdateCheckRow {
+        row,
+        run_check,
+        responsive_action: (summary, button),
+        install_underway,
+    }
 }
 
 /// The three non-terminal states [`drive_install`] reports through
@@ -1502,6 +1556,32 @@ pub(super) fn show_update_dialog(
     // the current channel, which turns the action button into a plain Close.
     let withdrawn = Rc::new(Cell::new(false));
     let offered_kind = release.kind;
+    let withdraw: Rc<dyn Fn()> = Rc::new({
+        let withdrawn = withdrawn.clone();
+        let status = status.clone();
+        let action = action.clone();
+        move || {
+            withdrawn.set(true);
+            status.set_text(
+                "This build is no longer offered on your update channel — check for updates again.",
+            );
+            action.set_label("Close");
+        }
+    });
+    ThemeManager::shared().on_release_channel_changed(&layer, {
+        let withdraw = withdraw.clone();
+        let withdrawn = withdrawn.clone();
+        let started = started.clone();
+        let installed = installed.clone();
+        Rc::new(move || {
+            if started.get() || installed.get() || withdrawn.get() {
+                return;
+            }
+            if !offer_still_eligible(ThemeManager::shared().release_channel(), offered_kind) {
+                withdraw();
+            }
+        })
+    });
     let action_layer = layer.clone();
     let action_overlay = window_overlay.clone();
     let action_root = blurred_root.clone();
@@ -1539,11 +1619,7 @@ pub(super) fn show_update_dialog(
         // another window. `withdrawn` rather than `started` so Cancel and
         // Escape keep dismissing normally.
         if !offer_still_eligible(ThemeManager::shared().release_channel(), offered_kind) {
-            withdrawn.set(true);
-            status.set_text(
-                "This build is no longer offered on your update channel — check for updates again.",
-            );
-            button.set_label("Close");
+            withdraw();
             return;
         }
         if started.replace(true) {
