@@ -1283,6 +1283,37 @@ switch:checked slider {
   border-right: 1px solid alpha(@theme_border, 0.6);
 }
 
+.fixed-scrollbar scrollbar,
+.fixed-scrollbar scrollbar:hover,
+.fixed-scrollbar scrollbar.hovering,
+.fixed-scrollbar scrollbar.dragging {
+  background: transparent;
+  border: none;
+  padding: 0;
+  transition: none;
+}
+
+.fixed-scrollbar scrollbar.vertical {
+  min-width: 5px;
+}
+
+.fixed-scrollbar scrollbar.horizontal {
+  min-height: 5px;
+}
+
+.fixed-scrollbar scrollbar > range > trough > slider {
+  border-width: 1px;
+  margin: 0;
+}
+
+.fixed-scrollbar scrollbar.vertical > range > trough > slider {
+  min-width: 3px;
+}
+
+.fixed-scrollbar scrollbar.horizontal > range > trough > slider {
+  min-height: 3px;
+}
+
 .sidebar {
   background: @theme_surface;
   padding: 8px 7px;

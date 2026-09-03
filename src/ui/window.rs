@@ -168,6 +168,7 @@ pub fn present_location(application: &gtk::Application, location: Option<PathBuf
         Rc::new(move |location| pin_status(&pinned_places.borrow(), location)),
     );
     sidebar.widget.set_size_request(MIN_SIDEBAR_WIDTH, -1);
+    browser.add_marquee_origin(&sidebar.widget);
     content.set_start_child(Some(&sidebar.widget));
     content.set_end_child(Some(&browser.widget()));
     let animation_generation = Rc::new(Cell::new(0));
@@ -1807,6 +1808,7 @@ fn build_sidebar(view: BrowserView, theme_manager: Rc<super::theme::ThemeManager
         .vexpand(true)
         .build();
     scroller.add_css_class("sidebar-scroll");
+    scroller.add_css_class("fixed-scrollbar");
 
     let update_content = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     let dot = gtk::Label::new(Some("●"));
