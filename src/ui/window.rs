@@ -29,6 +29,8 @@ use super::{
 const SIDEBAR_WIDTH: i32 = 208;
 const MIN_SIDEBAR_WIDTH: i32 = 176;
 const SIDEBAR_TRANSITION: Duration = Duration::from_millis(300);
+const PINNED_DRAG_PREFIX: &str = "pinned:";
+const STANDARD_PLACE_IDS: &[&str] = &["desktop", "documents", "downloads", "pictures", "videos"];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum MouseHistoryAction {
@@ -154,7 +156,7 @@ pub fn present_location(application: &gtk::Application, location: Option<PathBuf
     content.set_resize_start_child(false);
     content.set_position(SIDEBAR_WIDTH);
     content.set_vexpand(true);
-    let sidebar = build_sidebar(browser.clone());
+    let sidebar = build_sidebar(browser.clone(), theme_manager.clone());
     let weak_sidebar = Rc::downgrade(&sidebar.state);
     let pinned_places = sidebar.state.pinned_places.clone();
     browser.set_pin_handlers(
@@ -1056,6 +1058,7 @@ struct SidebarState {
     view: BrowserView,
     browser: Rc<Browser>,
     volume_monitor: gio::VolumeMonitor,
+    theme_manager: Rc<super::theme::ThemeManager>,
     place_order: RefCell<Vec<&'static str>>,
     pinned_places: Rc<RefCell<Vec<(Location, String)>>>,
     place_rows: RefCell<Vec<(Location, gtk::Button)>>,
@@ -1111,14 +1114,15 @@ impl SidebarState {
             .pinned_places
             .borrow()
             .iter()
-            .filter(|(location, _)| !is_standard_place_location(location))
-            .cloned()
+            .enumerate()
+            .filter(|(_, (location, _))| !is_standard_place_location(location))
+            .map(|(index, (location, name))| (index, location.clone(), name.clone()))
             .collect::<Vec<_>>();
         if !pinned.is_empty() {
             self.append_separator();
             self.append_heading("PINNED");
-            for (location, name) in pinned {
-                self.append_pinned_place(&name, location);
+            for (index, location, name) in pinned {
+                self.append_pinned_place(index, &name, location);
             }
         }
 
@@ -1264,37 +1268,20 @@ impl SidebarState {
         self.widget.append(&row);
     }
 
-    fn append_reorderable_place(
+    fn make_reorderable(
         self: &Rc<Self>,
-        id: &'static str,
-        icon: &str,
-        name: &str,
-        location: Location,
+        row: &gtk::Button,
+        payload: impl Fn() -> String + 'static,
+        on_drop: impl Fn(&Rc<Self>, &str, bool) -> bool + 'static,
     ) {
-        let row = sidebar_button(icon, name);
         row.add_css_class("reorderable");
         row.set_cursor_from_name(Some("grab"));
-        row.set_tooltip_text(Some(&location.display_path()));
-        self.place_rows
-            .borrow_mut()
-            .push((location.clone(), row.clone()));
-        let weak_browser = Rc::downgrade(&self.browser);
-        let sidebar = self.widget.clone();
-        let selected_row = row.clone();
-        row.connect_clicked(move |_| {
-            select_sidebar_row(&sidebar, &selected_row);
-            if let Some(browser) = weak_browser.upgrade() {
-                browser.navigate(location.clone());
-            }
-        });
 
         let drag = gtk::DragSource::builder()
             .actions(gtk::gdk::DragAction::MOVE)
             .build();
         drag.connect_prepare(move |_, _, _| {
-            Some(gtk::gdk::ContentProvider::for_value(
-                &id.to_string().to_value(),
-            ))
+            Some(gtk::gdk::ContentProvider::for_value(&payload().to_value()))
         });
         let dragged_row = row.clone();
         drag.connect_drag_begin(move |_, _| {
@@ -1317,18 +1304,70 @@ impl SidebarState {
             };
             let after = y >= f64::from(target_row.height()) / 2.0;
             if let Some(state) = weak_state.upgrade() {
-                state.reorder_place(&source, id, after);
-                return true;
+                return on_drop(&state, &source, after);
             }
             false
         });
         row.add_controller(drop);
+    }
+
+    fn append_reorderable_place(
+        self: &Rc<Self>,
+        id: &'static str,
+        icon: &str,
+        name: &str,
+        location: Location,
+    ) {
+        let row = sidebar_button(icon, name);
+        row.set_tooltip_text(Some(&location.display_path()));
+        self.place_rows
+            .borrow_mut()
+            .push((location.clone(), row.clone()));
+        let weak_browser = Rc::downgrade(&self.browser);
+        let sidebar = self.widget.clone();
+        let selected_row = row.clone();
+        row.connect_clicked(move |_| {
+            select_sidebar_row(&sidebar, &selected_row);
+            if let Some(browser) = weak_browser.upgrade() {
+                browser.navigate(location.clone());
+            }
+        });
+
+        self.make_reorderable(
+            &row,
+            // Standard rows drag their stable id, so a pinned row's numeric
+            // payload is rejected by the standard-place drop handler.
+            move || id.to_string(),
+            move |state, source, after| {
+                if source.starts_with(PINNED_DRAG_PREFIX) {
+                    return false;
+                }
+                state.reorder_place(source, id, after);
+                true
+            },
+        );
         self.widget.append(&row);
     }
 
     fn reorder_place(self: &Rc<Self>, source: &str, target: &str, after: bool) {
         let changed = reorder_places(&mut self.place_order.borrow_mut(), source, target, after);
         if changed {
+            let order = self
+                .place_order
+                .borrow()
+                .iter()
+                .map(|place| (*place).to_owned())
+                .collect();
+            self.theme_manager.set_sidebar_order(order);
+            self.rebuild();
+        }
+    }
+
+    fn reorder_pinned_place(self: &Rc<Self>, source: usize, target: usize, after: bool) {
+        let changed =
+            reorder_pinned_places(&mut self.pinned_places.borrow_mut(), source, target, after);
+        if changed {
+            save_pinned_places(&self.pinned_places.borrow());
             self.rebuild();
         }
     }
@@ -1463,8 +1502,9 @@ impl SidebarState {
         row.add_controller(context);
     }
 
-    fn append_pinned_place(self: &Rc<Self>, name: &str, location: Location) {
+    fn append_pinned_place(self: &Rc<Self>, index: usize, name: &str, location: Location) {
         let row = self.append_place(crate::assets::icons::FOLDER, name, location.clone());
+        self.make_pinned_row_reorderable(&row, index);
         let menu = gtk::Box::new(gtk::Orientation::Vertical, 0);
         menu.add_css_class("folder-context-menu");
         let unpin = sidebar_context_option(crate::assets::icons::PIN, "Unpin", false);
@@ -1518,6 +1558,20 @@ impl SidebarState {
         row.add_controller(context);
     }
 
+    fn make_pinned_row_reorderable(self: &Rc<Self>, row: &gtk::Button, index: usize) {
+        self.make_reorderable(
+            row,
+            move || format!("{PINNED_DRAG_PREFIX}{index}"),
+            move |state, source, after| {
+                let Some(source) = parse_pinned_drag_source(source) else {
+                    return false;
+                };
+                state.reorder_pinned_place(source, index, after);
+                true
+            },
+        );
+    }
+
     fn append_place(&self, icon: &str, name: &str, location: Location) -> gtk::Button {
         let row = sidebar_button(icon, name);
         row.set_tooltip_text(Some(&location.display_path()));
@@ -1565,6 +1619,34 @@ fn reorder_places(order: &mut Vec<&'static str>, source: &str, target: &str, aft
     true
 }
 
+fn reorder_pinned_places(
+    places: &mut Vec<(Location, String)>,
+    source: usize,
+    target: usize,
+    after: bool,
+) -> bool {
+    if source == target || source >= places.len() || target >= places.len() {
+        return false;
+    }
+    let place = places.remove(source);
+    // `source` is a pre-removal index, but `target` must remap onto the shrunken
+    // vector: any target that sat after `source` slides left by one. Since
+    // `destination == source` is checked in post-removal coordinates, a match
+    // means re-inserting into the original slot — a no-op worth reporting.
+    let target = target - usize::from(target > source);
+    let destination = (target + usize::from(after)).min(places.len());
+    if destination == source {
+        places.insert(source, place);
+        return false;
+    }
+    places.insert(destination, place);
+    true
+}
+
+fn parse_pinned_drag_source(source: &str) -> Option<usize> {
+    source.strip_prefix(PINNED_DRAG_PREFIX)?.parse().ok()
+}
+
 fn pin_status(places: &[(Location, String)], location: &Location) -> PinStatus {
     if is_standard_place_location(location) {
         PinStatus::Unavailable
@@ -1609,6 +1691,25 @@ fn is_standard_place_location(location: &Location) -> bool {
 
 fn should_show_standard_place(id: &str, path: &std::path::Path, home: &std::path::Path) -> bool {
     id != "desktop" || path != home
+}
+
+fn resolve_place_order(persisted: &[String]) -> Vec<&'static str> {
+    let mut order: Vec<&'static str> = Vec::new();
+    for id in persisted {
+        if let Some(canonical) = STANDARD_PLACE_IDS
+            .iter()
+            .find(|&&known| known == id.as_str())
+            && !order.contains(canonical)
+        {
+            order.push(*canonical);
+        }
+    }
+    for &id in STANDARD_PLACE_IDS {
+        if !order.contains(&id) {
+            order.push(id);
+        }
+    }
+    order
 }
 
 fn standard_place(id: &str) -> Option<(&'static str, &'static str, glib::UserDirectory)> {
@@ -1702,7 +1803,7 @@ fn sidebar_update_label(release: &ReleaseMetadata) -> String {
     }
 }
 
-fn build_sidebar(view: BrowserView) -> SidebarView {
+fn build_sidebar(view: BrowserView, theme_manager: Rc<super::theme::ThemeManager>) -> SidebarView {
     let widget = gtk::Box::new(gtk::Orientation::Vertical, 2);
     widget.add_css_class("sidebar");
     let scroller = gtk::ScrolledWindow::builder()
@@ -1743,18 +1844,14 @@ fn build_sidebar(view: BrowserView) -> SidebarView {
     shell.append(&scroller);
     shell.append(&update_area);
     let volume_monitor = gio::VolumeMonitor::get();
+    let place_order = resolve_place_order(&theme_manager.sidebar_order());
     let state = Rc::new(SidebarState {
         widget,
         browser: view.browser(),
         view,
         volume_monitor,
-        place_order: RefCell::new(vec![
-            "desktop",
-            "documents",
-            "downloads",
-            "pictures",
-            "videos",
-        ]),
+        theme_manager,
+        place_order: RefCell::new(place_order),
         pinned_places: Rc::new(RefCell::new(load_pinned_places())),
         place_rows: RefCell::new(Vec::new()),
     });
