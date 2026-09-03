@@ -423,6 +423,42 @@ fn general_page(browser: &BrowserView, manager: Rc<ThemeManager>) -> gtk::Widget
     });
     preferences.append(&search_open_row);
 
+    append_heading(&preferences, "REFRESH");
+    let interval = manager.auto_refresh_interval();
+    let options = ["Off", "1 min", "5 min", "10 min"];
+    let secs = [0, 60, 300, 600];
+    let active = secs.iter().position(|&s| s == interval).unwrap_or(0);
+    let (control, buttons) = segmented_control(&options, active);
+    let refresh_row = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    refresh_row.add_css_class("settings-option");
+    let refresh_copy = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    refresh_copy.set_hexpand(true);
+    let refresh_title = gtk::Label::new(Some("Auto-refresh interval"));
+    refresh_title.set_xalign(0.0);
+    refresh_title.add_css_class("settings-option-title");
+    let refresh_desc = gtk::Label::new(Some(
+        "Automatically reload the current folder. Useful for network shares where file monitors may miss changes.",
+    ));
+    refresh_desc.set_xalign(0.0);
+    refresh_desc.set_wrap(true);
+    refresh_desc.add_css_class("settings-option-description");
+    refresh_copy.append(&refresh_title);
+    refresh_copy.append(&refresh_desc);
+    refresh_row.append(&refresh_copy);
+    refresh_row.append(&control);
+    preferences.append(&refresh_row);
+    for (idx, button) in buttons.iter().enumerate() {
+        let manager = manager.clone();
+        let browser = browser.clone();
+        let secs = secs[idx];
+        button.connect_toggled(move |toggled| {
+            if toggled.is_active() {
+                manager.set_auto_refresh_interval(secs);
+                browser.set_auto_refresh_interval(secs);
+            }
+        });
+    }
+
     append_heading(&preferences, "VIDEO PREVIEWS");
     let (acceleration_active, acceleration_sensitive, backend_sensitive) =
         video_preview_control_state(manager.hardware_accelerated_video_previews());
@@ -1627,6 +1663,7 @@ fn keybindings_page() -> gtk::Widget {
     for (label, keys) in [
         ("Search", "Ctrl + K"),
         ("Open terminal", "Ctrl + T"),
+        ("Refresh", "F5 / Ctrl + R"),
         ("Open settings", "Ctrl + ,"),
     ] {
         append_keybinding(&content, label, keys);

@@ -298,6 +298,7 @@ pub(super) struct ViewState {
     pending_trash_summary: RefCell<Option<LoadHandle>>,
     pending_empty_trash: RefCell<Option<LoadHandle>>,
     trash_loading: RefCell<Option<TrashLoadingView>>,
+    auto_refresh: RefCell<Option<glib::SourceId>>,
     browser: Rc<Browser>,
 }
 
@@ -444,6 +445,7 @@ impl BrowserView {
             pending_trash_summary: RefCell::new(None),
             pending_empty_trash: RefCell::new(None),
             trash_loading: RefCell::new(None),
+            auto_refresh: RefCell::new(None),
             browser,
         });
 
@@ -840,6 +842,18 @@ impl BrowserView {
         launch_terminal(&location, &self.state.overlay);
     }
 
+    pub fn refresh(&self) {
+        if self.view_mode() == BrowserMode::Columns {
+            self.state.browser.refresh_all();
+        } else {
+            self.state.browser.reload_active();
+        }
+    }
+
+    pub fn set_auto_refresh_interval(&self, secs: u32) {
+        self.state.set_auto_refresh_interval(secs);
+    }
+
     pub fn show_location_properties(&self, location: &Location) {
         self.state.show_folder_properties(location);
     }
@@ -976,6 +990,39 @@ impl ViewState {
             self.global_activity_spinner
                 .set_tooltip_text(Some("Working…"));
         }
+    }
+
+    pub(super) fn set_auto_refresh_interval(self: &Rc<Self>, secs: u32) {
+        if let Some(source) = self.auto_refresh.take() {
+            source.remove();
+        }
+        if secs == 0 {
+            return;
+        }
+        let weak_state = Rc::downgrade(self);
+        let weak_browser = Rc::downgrade(&self.browser);
+        let source = glib::timeout_add_local(Duration::from_secs(u64::from(secs)), move || {
+            let Some(state) = weak_state.upgrade() else {
+                return glib::ControlFlow::Break;
+            };
+            if state.active_rename.borrow().is_some()
+                || state.active_new_entry.borrow().is_some()
+                || state.mode_views.borrow().rename_is_active()
+                || state.mode_views.borrow().new_entry_is_active()
+            {
+                return glib::ControlFlow::Continue;
+            }
+            let Some(browser) = weak_browser.upgrade() else {
+                return glib::ControlFlow::Break;
+            };
+            if state.mode_views.borrow().mode() == BrowserMode::Columns {
+                browser.refresh_all();
+            } else {
+                browser.reload_active();
+            }
+            glib::ControlFlow::Continue
+        });
+        self.auto_refresh.replace(Some(source));
     }
 
     fn sync_mode_selection(&self) {
@@ -3958,6 +4005,7 @@ impl ViewState {
         empty_trash.set_visible(is_trash);
         empty_trash.set_sensitive(false);
         header_actions.append(&empty_trash);
+        header_actions.append(&pane_refresh_button(&self.browser, depth));
         header_actions.append(&column_sort_direction_toggle(&self.browser, depth));
         header_actions.append(&column_sort_menu(&self.browser, depth));
 
@@ -5167,17 +5215,25 @@ pub(super) fn install_folder_context_menu(
         .build();
     popover.add_css_class("folder-context-popover");
 
-    let new_folder = context_menu_option("New Folder", Some("Ctrl+Shift+N"));
-    let new_file = context_menu_option("New File", None);
-    let paste = context_menu_option("Paste", Some("Ctrl+V"));
-    let select_all = context_menu_option("Select All", Some("Ctrl+A"));
-    let open_terminal = context_menu_option("Open in Terminal", Some("Ctrl+T"));
-    let properties = context_menu_option("Properties", None);
+    let new_folder = context_menu_option(
+        crate::assets::icons::FOLDER_PLUS,
+        "New Folder",
+        "Ctrl+Shift+N",
+    );
+    let new_file = context_menu_option(crate::assets::icons::FILE_PLUS, "New File", "");
+    let open_terminal =
+        context_menu_option(crate::assets::icons::TERMINAL, "Open in Terminal", "Ctrl+T");
+    let paste = context_menu_option(crate::assets::icons::CLIPBOARD_PASTE, "Paste", "Ctrl+V");
+    let select_all = context_menu_option(crate::assets::icons::LIST_CHECKS, "Select All", "Ctrl+A");
+    let refresh = context_menu_option(crate::assets::icons::REFRESH, "Refresh", "F5");
+    let properties = context_menu_option(crate::assets::icons::INFO, "Properties", "");
     content.append(&new_folder);
     content.append(&new_file);
+    content.append(&open_terminal);
+    content.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
     content.append(&paste);
     content.append(&select_all);
-    content.append(&open_terminal);
+    content.append(&refresh);
     content.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
     content.append(&properties);
 
@@ -5232,6 +5288,16 @@ pub(super) fn install_folder_context_menu(
         }
         if let Some(state) = weak.upgrade() {
             state.select_all(depth);
+        }
+    });
+    let weak = Rc::downgrade(state);
+    let refresh_popover = popover.downgrade();
+    refresh.connect_clicked(move |_| {
+        if let Some(popover) = refresh_popover.upgrade() {
+            popover.popdown();
+        }
+        if let Some(state) = weak.upgrade() {
+            state.browser.retry_column(depth);
         }
     });
     let weak = Rc::downgrade(state);
@@ -6538,20 +6604,39 @@ fn item_context_option_with_icon(icon: gtk::Image, label: &str, accelerator: &st
     button
 }
 
-fn context_menu_option(label: &str, accelerator: Option<&str>) -> gtk::Button {
+fn context_menu_option(icon: &str, label: &str, accelerator: &str) -> gtk::Button {
     let button = gtk::Button::new();
     button.add_css_class("folder-context-option");
-    let row = gtk::Box::new(gtk::Orientation::Horizontal, 18);
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let icon = crate::assets::primary_icon(icon, 15);
+    icon.add_css_class("folder-context-icon");
     let title = gtk::Label::new(Some(label));
     title.set_xalign(0.0);
     title.set_hexpand(true);
+    row.append(&icon);
     row.append(&title);
-    if let Some(accelerator) = accelerator {
+    if !accelerator.is_empty() {
         let shortcut = gtk::Label::new(Some(accelerator));
         shortcut.add_css_class("folder-context-shortcut");
         row.append(&shortcut);
     }
     button.set_child(Some(&row));
+    button
+}
+
+pub(super) fn pane_refresh_button(browser: &Rc<Browser>, depth: usize) -> gtk::Button {
+    let button = gtk::Button::builder().tooltip_text("Refresh (F5)").build();
+    button.set_child(Some(&crate::assets::primary_icon(
+        crate::assets::icons::REFRESH,
+        16,
+    )));
+    button.add_css_class("column-header-action");
+    let weak_browser = Rc::downgrade(browser);
+    button.connect_clicked(move |_| {
+        if let Some(browser) = weak_browser.upgrade() {
+            browser.retry_column(depth);
+        }
+    });
     button
 }
 
