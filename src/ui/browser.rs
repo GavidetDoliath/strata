@@ -2728,14 +2728,8 @@ impl ViewState {
                 .unwrap_or_else(|| "—".to_owned())
         };
         let size = properties_row(&details, "SIZE", &initial_size);
-        let modified = properties_row(
-            &details,
-            "MODIFIED",
-            &entry
-                .as_ref()
-                .map(metadata_modified)
-                .unwrap_or_else(|| "—".to_owned()),
-        );
+        let modified = properties_row(&details, "MODIFIED", "—");
+        crate::util::set_modified_date(&modified, entry.as_ref(), "—");
         let opens_with = properties_row(&details, "OPENS WITH", "—");
         let hidden = properties_row(
             &details,
@@ -7634,16 +7628,6 @@ fn compact_native_path(path: &Path) -> String {
         .ok()
         .map(|suffix| format!("~/{}", suffix.to_string_lossy()))
         .unwrap_or_else(|| path.to_string_lossy().into_owned())
-}
-
-fn metadata_modified(entry: &FileEntry) -> String {
-    let crate::model::MetadataValue::Known(seconds) = entry.modified_unix_seconds else {
-        return "—".to_owned();
-    };
-    glib::DateTime::from_unix_local(seconds)
-        .and_then(|date| date.format("%Y-%m-%d %H:%M"))
-        .map(|value| value.to_string())
-        .unwrap_or_else(|_| "—".to_owned())
 }
 
 fn properties_row(parent: &gtk::Box, label: &str, value: &str) -> gtk::Label {
