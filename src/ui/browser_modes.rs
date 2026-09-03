@@ -60,6 +60,53 @@ pub enum BrowserDensity {
     Airy,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ClickCount {
+    One,
+    Two,
+}
+
+impl ClickCount {
+    pub fn from_stored(value: u8) -> Option<Self> {
+        match value {
+            1 => Some(Self::One),
+            2 => Some(Self::Two),
+            _ => None,
+        }
+    }
+
+    pub fn stored(self) -> u8 {
+        match self {
+            Self::One => 1,
+            Self::Two => 2,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ClickActivation {
+    pub files: ClickCount,
+    pub folders: ClickCount,
+}
+
+impl ClickActivation {
+    pub fn default_for(mode: BrowserMode) -> Self {
+        Self {
+            files: ClickCount::Two,
+            folders: match mode {
+                BrowserMode::Columns => ClickCount::One,
+                BrowserMode::Grid | BrowserMode::Explorer => ClickCount::Two,
+            },
+        }
+    }
+}
+
+impl Default for ClickActivation {
+    fn default() -> Self {
+        Self::default_for(BrowserMode::Columns)
+    }
+}
+
 struct ActiveModeRename {
     field: gtk::Entry,
     label: gtk::Label,
@@ -111,6 +158,8 @@ pub struct ModeViews {
     explorer_pane: Option<Pane>,
     browser: Rc<Browser>,
     single_click_previews: Rc<Cell<bool>>,
+    grid_click_activation: Rc<Cell<ClickActivation>>,
+    explorer_click_activation: Rc<Cell<ClickActivation>>,
     transfer_handler: TransferHandlerSlot,
     cut_locations: Rc<RefCell<HashSet<Location>>>,
     context_state: RefCell<Option<Weak<super::browser::ViewState>>>,
@@ -169,6 +218,12 @@ impl ModeViews {
             explorer_pane: None,
             browser,
             single_click_previews: Rc::new(Cell::new(true)),
+            grid_click_activation: Rc::new(Cell::new(ClickActivation::default_for(
+                BrowserMode::Grid,
+            ))),
+            explorer_click_activation: Rc::new(Cell::new(ClickActivation::default_for(
+                BrowserMode::Explorer,
+            ))),
             transfer_handler: Rc::new(RefCell::new(None)),
             cut_locations: Rc::new(RefCell::new(HashSet::new())),
             context_state: RefCell::new(None),
@@ -452,6 +507,14 @@ impl ModeViews {
         self.single_click_previews.set(enabled);
     }
 
+    pub fn set_click_activation(&self, mode: BrowserMode, activation: ClickActivation) {
+        match mode {
+            BrowserMode::Columns => {}
+            BrowserMode::Grid => self.grid_click_activation.set(activation),
+            BrowserMode::Explorer => self.explorer_click_activation.set(activation),
+        }
+    }
+
     pub fn set_transfer_handler(&self, handler: TransferHandler) {
         self.transfer_handler.replace(Some(handler));
     }
@@ -513,7 +576,10 @@ impl ModeViews {
                 self.grid_panes.clear();
                 let pane = build_grid_pane(
                     self.browser.clone(),
-                    self.single_click_previews.clone(),
+                    ModeClickOptions {
+                        previews: self.single_click_previews.clone(),
+                        activation: self.grid_click_activation.clone(),
+                    },
                     self.transfer_handler.clone(),
                     self.cut_locations.clone(),
                     GridOptions {
@@ -532,7 +598,10 @@ impl ModeViews {
                 clear_box(&self.explorer_root);
                 let pane = build_explorer_pane(
                     self.browser.clone(),
-                    self.single_click_previews.clone(),
+                    ModeClickOptions {
+                        previews: self.single_click_previews.clone(),
+                        activation: self.explorer_click_activation.clone(),
+                    },
                     self.transfer_handler.clone(),
                     self.cut_locations.clone(),
                     self.active_new_entry.clone(),
@@ -764,7 +833,10 @@ impl ModeViews {
         self.grid_panes.clear();
         let pane = build_grid_pane(
             self.browser.clone(),
-            self.single_click_previews.clone(),
+            ModeClickOptions {
+                previews: self.single_click_previews.clone(),
+                activation: self.grid_click_activation.clone(),
+            },
             self.transfer_handler.clone(),
             self.cut_locations.clone(),
             GridOptions {
@@ -792,7 +864,10 @@ impl ModeViews {
         clear_box(&self.explorer_root);
         let pane = build_explorer_pane(
             self.browser.clone(),
-            self.single_click_previews.clone(),
+            ModeClickOptions {
+                previews: self.single_click_previews.clone(),
+                activation: self.explorer_click_activation.clone(),
+            },
             self.transfer_handler.clone(),
             self.cut_locations.clone(),
             self.active_new_entry.clone(),
@@ -818,6 +893,12 @@ struct GridOptions {
     peek_state: Option<Weak<super::browser::ViewState>>,
     thumbnail_size: Rc<Cell<i32>>,
     active_new_entry: Rc<RefCell<Option<ActiveModeNewEntry>>>,
+}
+
+#[derive(Clone)]
+struct ModeClickOptions {
+    previews: Rc<Cell<bool>>,
+    activation: Rc<Cell<ClickActivation>>,
 }
 
 fn submit_mode_new_entry(
@@ -998,7 +1079,7 @@ fn grid_controls(browser: &Rc<Browser>, depth: usize, thumbnail_size: i32) -> Gr
 
 fn build_grid_pane(
     browser: Rc<Browser>,
-    single_click_previews: Rc<Cell<bool>>,
+    click_options: ModeClickOptions,
     transfer_handler: TransferHandlerSlot,
     cut_locations: Rc<RefCell<HashSet<Location>>>,
     options: GridOptions,
@@ -1044,7 +1125,8 @@ fn build_grid_pane(
     let selection_for_setup = selection.clone();
     let selection_anchor = Rc::new(Cell::new(None::<u32>));
     let browser_for_setup = Rc::downgrade(&browser);
-    let previews_for_setup = single_click_previews.clone();
+    let previews_for_setup = click_options.previews;
+    let activation_for_setup = click_options.activation;
     let source_for_setup = model.clone();
     let filtered_for_setup = view_model.clone().upcast::<gio::ListModel>();
     let transfers_for_setup = transfer_handler.clone();
@@ -1118,6 +1200,7 @@ fn build_grid_pane(
             item,
             browser_for_setup.clone(),
             previews_for_setup.clone(),
+            activation_for_setup.clone(),
             depth,
             Some((source_for_setup.clone(), filtered_for_setup.clone())),
         );
@@ -1604,7 +1687,7 @@ fn explorer_navigation(browser: &Rc<Browser>) -> gtk::Box {
 
 fn build_explorer_pane(
     browser: Rc<Browser>,
-    single_click_previews: Rc<Cell<bool>>,
+    click_options: ModeClickOptions,
     transfer_handler: TransferHandlerSlot,
     cut_locations: Rc<RefCell<HashSet<Location>>>,
     active_new_entry: Rc<RefCell<Option<ActiveModeNewEntry>>>,
@@ -1666,7 +1749,8 @@ fn build_explorer_pane(
     let selection_for_setup = selection.clone();
     let selection_anchor = Rc::new(Cell::new(None::<u32>));
     let browser_for_setup = Rc::downgrade(&browser);
-    let previews_for_setup = single_click_previews.clone();
+    let previews_for_setup = click_options.previews;
+    let activation_for_setup = click_options.activation;
     let transfers_for_setup = transfer_handler.clone();
     let active_for_setup = active_new_entry.clone();
     let source_for_setup = model.clone();
@@ -1747,6 +1831,7 @@ fn build_explorer_pane(
             item,
             browser_for_setup.clone(),
             previews_for_setup.clone(),
+            activation_for_setup.clone(),
             depth,
             Some((source_for_setup.clone(), view_model_for_setup.clone())),
         );
@@ -1842,7 +1927,7 @@ fn build_explorer_pane(
     let view = gtk::ListView::new(Some(selection.clone()), Some(factory));
     view.add_css_class("explorer-list");
     view.set_enable_rubberband(false);
-    view.set_single_click_activate(true);
+    view.set_single_click_activate(false);
     let weak_browser = Rc::downgrade(&browser);
     let source_for_activation = model.clone();
     let view_model_for_activation = view_model_object.clone();
@@ -2423,6 +2508,7 @@ fn install_preview_click(
     item: &gtk::ListItem,
     browser: Weak<Browser>,
     enabled: Rc<Cell<bool>>,
+    click_activation: Rc<Cell<ClickActivation>>,
     depth: usize,
     position_map: Option<(gtk::StringList, gio::ListModel)>,
 ) {
@@ -2430,9 +2516,6 @@ fn install_preview_click(
     click.set_button(1);
     let item = item.clone();
     click.connect_released(move |gesture, press_count, _, _| {
-        if press_count != 1 || !enabled.get() {
-            return;
-        }
         let modifiers = gesture.current_event_state();
         if modifiers
             .intersects(gtk::gdk::ModifierType::CONTROL_MASK | gtk::gdk::ModifierType::SHIFT_MASK)
@@ -2457,11 +2540,32 @@ fn install_preview_click(
         let Some(entry) = browser.entry_at(depth, position) else {
             return;
         };
-        if !entry.is_directory() && super::browser::entry_supports_quick_preview(&entry) {
+        if should_activate_pointer_click(press_count, entry.is_directory(), click_activation.get())
+        {
+            gesture.set_state(gtk::EventSequenceState::Claimed);
+            browser.activate_in_place(depth, position);
+        } else if press_count == 1
+            && enabled.get()
+            && !entry.is_directory()
+            && super::browser::entry_supports_quick_preview(&entry)
+        {
             browser.preview(depth, position);
         }
     });
     widget.add_controller(click);
+}
+
+fn should_activate_pointer_click(
+    press_count: i32,
+    is_directory: bool,
+    activation: ClickActivation,
+) -> bool {
+    let configured = if is_directory {
+        activation.folders
+    } else {
+        activation.files
+    };
+    press_count == 1 && configured == ClickCount::One
 }
 
 fn connect_selection(

@@ -25,6 +25,7 @@ mod tests;
 use super::{
     blur::BlurBin,
     browser::{BrowserView, dismiss_modal_layer, modal_layer},
+    browser_modes::{BrowserMode, ClickActivation, ClickCount},
     controls::{form_entry, menu_option, modal_layout, segmented_control},
     theme::{Theme, ThemeManager, ThemeTokens},
 };
@@ -37,6 +38,18 @@ struct UpdateCheckRow {
     run_check: Rc<dyn Fn(bool)>,
     responsive_action: (gtk::Box, gtk::Button),
     install_underway: Rc<dyn Fn() -> bool>,
+}
+
+struct ResponsiveContent {
+    flows: Vec<(gtk::FlowBox, u32)>,
+    actions: Vec<(gtk::Box, gtk::Button)>,
+    setting_rows: Vec<gtk::Box>,
+    activation_rows: Vec<ResponsiveActivationRow>,
+}
+
+pub struct ResponsiveActivationRow {
+    row: gtk::Box,
+    options: Vec<gtk::Box>,
 }
 
 /// Shared "an install is running" guard across the update row and update
@@ -89,6 +102,8 @@ mod responsive_bin {
         pub navigation_contents: RefCell<Vec<gtk::Box>>,
         pub responsive_flows: RefCell<Vec<(gtk::FlowBox, u32)>>,
         pub responsive_actions: RefCell<Vec<(gtk::Box, gtk::Button)>>,
+        pub responsive_setting_rows: RefCell<Vec<gtk::Box>>,
+        pub responsive_activation_rows: RefCell<Vec<ResponsiveActivationRow>>,
     }
 
     #[glib::object_subclass]
@@ -154,6 +169,35 @@ mod responsive_bin {
                     });
                     action.set_halign(gtk::Align::Fill);
                 }
+                for row in self.responsive_setting_rows.borrow().iter() {
+                    row.set_orientation(if compact {
+                        gtk::Orientation::Vertical
+                    } else {
+                        gtk::Orientation::Horizontal
+                    });
+                    row.set_spacing(if compact { 8 } else { 16 });
+                }
+                for responsive_row in self.responsive_activation_rows.borrow().iter() {
+                    responsive_row.row.set_orientation(if compact {
+                        gtk::Orientation::Vertical
+                    } else {
+                        gtk::Orientation::Horizontal
+                    });
+                    responsive_row.row.set_spacing(if compact { 4 } else { 12 });
+                    for option in &responsive_row.options {
+                        option.set_orientation(if compact {
+                            gtk::Orientation::Vertical
+                        } else {
+                            gtk::Orientation::Horizontal
+                        });
+                        option.set_spacing(if compact { 2 } else { 6 });
+                    }
+                    if compact {
+                        responsive_row.row.add_css_class("compact");
+                    } else {
+                        responsive_row.row.remove_css_class("compact");
+                    }
+                }
             }
             let x = ((width - child_width) / 2) as f32;
             let y = ((height - child_height) / 2) as f32;
@@ -176,8 +220,7 @@ impl ResponsiveBin {
         navigation_heading: &gtk::Label,
         navigation_labels: Vec<gtk::Label>,
         navigation_contents: Vec<gtk::Box>,
-        responsive_flows: Vec<(gtk::FlowBox, u32)>,
-        responsive_actions: Vec<(gtk::Box, gtk::Button)>,
+        responsive: ResponsiveContent,
     ) -> Self {
         let bin: Self = glib::Object::new();
         let imp = bin.imp();
@@ -186,8 +229,11 @@ impl ResponsiveBin {
             .replace(Some(navigation_heading.clone()));
         imp.navigation_labels.replace(navigation_labels);
         imp.navigation_contents.replace(navigation_contents);
-        imp.responsive_flows.replace(responsive_flows);
-        imp.responsive_actions.replace(responsive_actions);
+        imp.responsive_flows.replace(responsive.flows);
+        imp.responsive_actions.replace(responsive.actions);
+        imp.responsive_setting_rows.replace(responsive.setting_rows);
+        imp.responsive_activation_rows
+            .replace(responsive.activation_rows);
         child.set_parent(&bin);
         bin
     }
@@ -261,7 +307,9 @@ pub fn build_layer(
         .hexpand(true)
         .vexpand(true)
         .build();
-    stack.add_named(&general_page(browser, themes.clone()), Some("general"));
+    let (general, responsive_setting_rows, responsive_activation_rows) =
+        general_page(browser, themes.clone());
+    stack.add_named(&general, Some("general"));
     let (updates, responsive_actions) = updates_page(themes.clone(), update_notice, install_guard);
     stack.add_named(&updates, Some("updates"));
     stack.add_named(&keybindings_page(), Some("keybindings"));
@@ -314,8 +362,12 @@ pub fn build_layer(
         &navigation_heading,
         navigation_labels,
         navigation_contents,
-        responsive_flows,
-        responsive_actions,
+        ResponsiveContent {
+            flows: responsive_flows,
+            actions: responsive_actions,
+            setting_rows: responsive_setting_rows,
+            activation_rows: responsive_activation_rows,
+        },
     );
     responsive_panel.set_hexpand(false);
     responsive_panel.set_vexpand(false);
@@ -394,7 +446,10 @@ fn hide(layer: &gtk::Box, button: &gtk::Button, root: &BlurBin) {
     });
 }
 
-fn general_page(browser: &BrowserView, manager: Rc<ThemeManager>) -> gtk::Widget {
+fn general_page(
+    browser: &BrowserView,
+    manager: Rc<ThemeManager>,
+) -> (gtk::Widget, Vec<gtk::Box>, Vec<ResponsiveActivationRow>) {
     let preferences = page_content();
     append_heading(&preferences, "BROWSING");
     let peeking_enabled = manager.folder_peeking();
@@ -506,12 +561,53 @@ fn general_page(browser: &BrowserView, manager: Rc<ThemeManager>) -> gtk::Widget
         "Disable nonessential interface animations.",
         manager.reduce_motion(),
     );
+    let manager_for_motion = manager.clone();
     reduce_motion.connect_active_notify(move |toggle| {
-        manager.set_reduce_motion(toggle.is_active());
+        manager_for_motion.set_reduce_motion(toggle.is_active());
     });
     preferences.append(&motion_row);
 
-    scrollable_page(&preferences, None)
+    append_heading(&preferences, "CLICK ACTIVATION");
+    let activation_options = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    let mut responsive_activation_rows = Vec::new();
+    activation_options.add_css_class("settings-option");
+    activation_options.add_css_class("click-activation-options");
+    for (label, mode) in [
+        ("List", BrowserMode::Columns),
+        ("Grid", BrowserMode::Grid),
+        ("Explorer", BrowserMode::Explorer),
+    ] {
+        let activation = manager.click_activation(mode);
+        browser.set_click_activation(mode, activation);
+        let (row, options, file_buttons, folder_buttons) =
+            click_activation_option(label, activation);
+        let update = Rc::new({
+            let browser = browser.clone();
+            let manager = manager.clone();
+            move |files, folders| {
+                let activation = ClickActivation { files, folders };
+                browser.set_click_activation(mode, activation);
+                manager.set_click_activation(mode, activation);
+            }
+        });
+        connect_click_activation_buttons(&file_buttons, &folder_buttons, update.clone());
+        connect_click_activation_buttons(
+            &folder_buttons,
+            &file_buttons,
+            Rc::new(move |folders, files| {
+                update(files, folders);
+            }),
+        );
+        activation_options.append(&row);
+        responsive_activation_rows.push(ResponsiveActivationRow { row, options });
+    }
+    preferences.append(&activation_options);
+
+    (
+        scrollable_page(&preferences, None),
+        vec![video_row],
+        responsive_activation_rows,
+    )
 }
 
 fn updates_page(
@@ -2486,6 +2582,71 @@ fn page_content() -> gtk::Box {
     content
 }
 
+fn click_activation_option(
+    mode: &str,
+    activation: ClickActivation,
+) -> (
+    gtk::Box,
+    Vec<gtk::Box>,
+    Vec<gtk::ToggleButton>,
+    Vec<gtk::ToggleButton>,
+) {
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    row.add_css_class("click-activation-row");
+    let title = gtk::Label::new(Some(mode));
+    title.set_xalign(0.0);
+    title.set_width_chars(8);
+    title.add_css_class("settings-option-title");
+    row.append(&title);
+
+    let selected = |count| usize::from(count == ClickCount::Two);
+    let (file_control, file_buttons) =
+        segmented_control(&["1 click", "2 clicks"], selected(activation.files));
+    let (folder_control, folder_buttons) =
+        segmented_control(&["1 click", "2 clicks"], selected(activation.folders));
+    let mut options = Vec::new();
+    for (label, control) in [("Files", &file_control), ("Folders", &folder_control)] {
+        let option = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        option.set_hexpand(true);
+        let label = gtk::Label::new(Some(label));
+        label.set_xalign(0.0);
+        label.set_width_chars(7);
+        label.add_css_class("settings-option-description");
+        control.set_hexpand(true);
+        control.add_css_class("click-activation-control");
+        option.append(&label);
+        option.append(control);
+        row.append(&option);
+        options.push(option);
+    }
+    (row, options, file_buttons, folder_buttons)
+}
+
+fn connect_click_activation_buttons(
+    buttons: &[gtk::ToggleButton],
+    other_buttons: &[gtk::ToggleButton],
+    update: Rc<dyn Fn(ClickCount, ClickCount)>,
+) {
+    for button in buttons {
+        let buttons = buttons.to_vec();
+        let other_buttons = other_buttons.to_vec();
+        let update = update.clone();
+        button.connect_toggled(move |button| {
+            if !button.is_active() {
+                return;
+            }
+            let selected = |buttons: &[gtk::ToggleButton]| {
+                if buttons.get(1).is_some_and(gtk::ToggleButton::is_active) {
+                    ClickCount::Two
+                } else {
+                    ClickCount::One
+                }
+            };
+            update(selected(&buttons), selected(&other_buttons));
+        });
+    }
+}
+
 fn settings_option(title: &str, description: &str, active: bool) -> (gtk::Box, gtk::Switch) {
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 16);
     row.add_css_class("settings-option");
@@ -2494,6 +2655,8 @@ fn settings_option(title: &str, description: &str, active: bool) -> (gtk::Box, g
     copy.set_valign(gtk::Align::Center);
     let title_label = gtk::Label::new(Some(title));
     title_label.set_xalign(0.0);
+    title_label.set_wrap(true);
+    title_label.set_wrap_mode(gtk::pango::WrapMode::WordChar);
     title_label.add_css_class("settings-option-title");
     let description_label = gtk::Label::new(Some(description));
     description_label.set_xalign(0.0);
@@ -2580,8 +2743,11 @@ fn video_preview_option(
         });
     }
     toggle.set_sensitive(toggle_sensitive);
-    row.append(&backend);
-    row.append(&toggle);
+    let controls = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+    controls.set_valign(gtk::Align::Center);
+    controls.append(&backend);
+    controls.append(&toggle);
+    row.append(&controls);
     (row, toggle, backend)
 }
 
