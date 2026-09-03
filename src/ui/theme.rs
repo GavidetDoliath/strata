@@ -91,6 +91,10 @@ struct Preferences {
     #[serde(default = "default_enabled")]
     check_for_updates: bool,
     #[serde(default)]
+    preview_muted: bool,
+    #[serde(default = "default_full_volume")]
+    preview_volume: f64,
+    #[serde(default)]
     auto_refresh_interval: u32,
     #[serde(default = "default_release_channel")]
     release_channel: String,
@@ -114,6 +118,8 @@ impl Default for Preferences {
             sort_key: default_sort_key(),
             sort_direction: default_sort_direction(),
             check_for_updates: true,
+            preview_muted: false,
+            preview_volume: default_full_volume(),
             auto_refresh_interval: 0,
             release_channel: default_release_channel(),
         }
@@ -146,6 +152,10 @@ fn default_sort_key() -> String {
 
 fn default_sort_direction() -> String {
     "ascending".to_owned()
+}
+
+fn default_full_volume() -> f64 {
+    1.0
 }
 
 pub struct ThemeManager {
@@ -295,6 +305,24 @@ impl ThemeManager {
 
     pub fn set_checks_for_updates(&self, enabled: bool) {
         self.preferences.borrow_mut().check_for_updates = enabled;
+        self.save_preferences();
+    }
+
+    pub fn preview_muted(&self) -> bool {
+        self.preferences.borrow().preview_muted
+    }
+
+    pub fn set_preview_muted(&self, muted: bool) {
+        self.preferences.borrow_mut().preview_muted = muted;
+        self.save_preferences();
+    }
+
+    pub fn preview_volume(&self) -> f64 {
+        self.preferences.borrow().preview_volume
+    }
+
+    pub fn set_preview_volume(&self, volume: f64) {
+        self.preferences.borrow_mut().preview_volume = volume.clamp(0.0, 1.0);
         self.save_preferences();
     }
 
