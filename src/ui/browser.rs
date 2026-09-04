@@ -2903,6 +2903,10 @@ impl ViewState {
             "Close",
         );
         layout.content.add_css_class("properties-content");
+        layout.title.set_max_width_chars(44);
+        layout.title.set_wrap(true);
+        layout.title.set_lines(2);
+        layout.title.set_wrap_mode(gtk::pango::WrapMode::WordChar);
         layout
             .title
             .set_ellipsize(gtk::pango::EllipsizeMode::Middle);
@@ -2975,8 +2979,7 @@ impl ViewState {
         permissions.append(&executable);
         layout.body.append(&permissions);
 
-        let actions = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-        actions.add_css_class("properties-actions");
+        layout.actions.add_css_class("properties-actions");
         let open = properties_action(crate::assets::icons::EXTERNAL_LINK, "Open");
         let rename = properties_action(crate::assets::icons::PENCIL, "Rename");
         rename.set_sensitive(entry.is_some());
@@ -2989,11 +2992,10 @@ impl ViewState {
                 && pin_status == PinStatus::Available,
         );
         let copy_path = properties_action(crate::assets::icons::COPY, "Copy path");
-        actions.append(&open);
-        actions.append(&rename);
-        actions.append(&pin);
-        actions.append(&copy_path);
-        layout.actions.prepend(&actions);
+        layout.actions.prepend(&copy_path);
+        layout.actions.prepend(&pin);
+        layout.actions.prepend(&rename);
+        layout.actions.prepend(&open);
         let content = layout.content;
 
         let layer = modal_layer(&content, &window_overlay, blurred_root.clone(), None);
@@ -8228,6 +8230,7 @@ fn properties_row(parent: &gtk::Box, label: &str, value: &str) -> gtk::Label {
     let value = gtk::Label::new(Some(value));
     value.add_css_class("properties-row-value");
     value.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+    value.set_max_width_chars(48);
     value.set_hexpand(true);
     value.set_xalign(0.0);
     row.append(&label);
