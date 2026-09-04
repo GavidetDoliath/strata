@@ -147,6 +147,11 @@ pub enum BrowserEvent {
     },
     OperationCompletedWithErrors {
         message: String,
+        /// Entries a retry with `permanent: true` would likely delete
+        /// successfully, e.g. ones that failed only because this location
+        /// doesn't support Trash. Always empty for a restore failure.
+        retryable_locations: Vec<Location>,
+        has_non_retryable_failures: bool,
     },
     OperationCancelled {
         completed: usize,
@@ -1300,11 +1305,17 @@ impl Browser {
                 }
                 OperationEvent::CompletedWithErrors {
                     deleted_locations,
+                    retryable_locations,
+                    has_non_retryable_failures,
                     message,
                     ..
                 } => {
                     browser.remove_deleted_locations(&deleted_locations);
-                    browser.emit(BrowserEvent::OperationCompletedWithErrors { message });
+                    browser.emit(BrowserEvent::OperationCompletedWithErrors {
+                        message,
+                        retryable_locations,
+                        has_non_retryable_failures,
+                    });
                 }
                 OperationEvent::Deleted { locations, .. }
                 | OperationEvent::Restored { locations, .. } => {
@@ -1316,7 +1327,11 @@ impl Browser {
                     ..
                 } => {
                     browser.remove_deleted_locations(&restored_locations);
-                    browser.emit(BrowserEvent::OperationCompletedWithErrors { message });
+                    browser.emit(BrowserEvent::OperationCompletedWithErrors {
+                        message,
+                        retryable_locations: Vec::new(),
+                        has_non_retryable_failures: true,
+                    });
                 }
                 OperationEvent::Cancelled { result, .. } => {
                     let mut affected_locations = refresh_locations.clone();
