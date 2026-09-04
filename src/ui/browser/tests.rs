@@ -1540,3 +1540,130 @@ fn move_to_trash_stays_visible_inside_trash_regardless_of_can_trash() {
     assert!(move_to_trash_is_visible(true, Some(false)));
     assert!(move_to_trash_is_visible(true, None));
 }
+
+fn mapped_source(values: &[&str]) -> EntryListModel {
+    let owned: Vec<String> = values.iter().map(|value| (*value).to_owned()).collect();
+    let model = EntryListModel::new(std::rc::Rc::new(move |position| {
+        owned.get(position as usize).cloned()
+    }));
+    model.replace(values.len() as u32);
+    model
+}
+
+#[test]
+fn unfiltered_visible_listings_keep_source_order() {
+    let source = mapped_source(&["fv\ta", "fv\tb", "fv\tc"]);
+    let map = rebuild_position_map(&source, "", true, 1);
+    assert_eq!(map.forward, vec![0, 1, 2]);
+    assert_eq!(map.reverse, vec![0, 1, 2]);
+}
+
+#[test]
+fn hidden_entries_are_omitted_from_the_position_map() {
+    let source = mapped_source(&["fv\talpha", "dh\t.secret", "fv\tzulu"]);
+    let map = rebuild_position_map(&source, "", false, 1);
+    assert_eq!(map.forward, vec![0, 2]);
+    assert_eq!(map.reverse[0], 0);
+    assert_eq!(map.reverse[1], NO_FILTERED_POSITION);
+    assert_eq!(map.reverse[2], 1);
+}
+
+#[test]
+fn filter_queries_keep_matches_near_the_end() {
+    let source = mapped_source(&["fv\talpha", "fv\tbeta", "fv\tzulu"]);
+    let map = rebuild_position_map(&source, "zu", true, 4);
+    assert_eq!(map.forward, vec![2]);
+    assert_eq!(map.query, "zu");
+    assert_eq!(map.generation, 4);
+}
+
+#[test]
+fn filter_change_for_classifies_tightening_and_loosening() {
+    assert_eq!(filter_change_for("", "a"), gtk::FilterChange::MoreStrict);
+    assert_eq!(filter_change_for("a", "ab"), gtk::FilterChange::MoreStrict);
+    assert_eq!(filter_change_for("ab", "a"), gtk::FilterChange::LessStrict);
+    assert_eq!(filter_change_for("a", ""), gtk::FilterChange::LessStrict);
+    assert_eq!(filter_change_for("a", "b"), gtk::FilterChange::Different);
+    assert_eq!(filter_change_for("ab", "ac"), gtk::FilterChange::Different);
+}
+
+const FILTER_QUERY_GTK_CHILD: &str = "STRATA_FILTER_QUERY_GTK_CHILD";
+const FILTER_QUERY_TEST: &str =
+    "ui::browser::tests::notify_filter_query_skips_unchanged_folded_text";
+
+fn assert_notify_filter_query_skips_unchanged_folded_text() {
+    use gtk::prelude::*;
+    use std::{cell::Cell, rc::Rc};
+
+    let filter = gtk::CustomFilter::new(|_| true);
+    let emissions = Rc::new(Cell::new(0u32));
+    let emissions_for_signal = emissions.clone();
+    filter.connect_changed(move |_, _| {
+        emissions_for_signal.set(emissions_for_signal.get() + 1);
+    });
+    let query = std::cell::RefCell::new(String::new());
+
+    notify_filter_query(&filter, &query, "Abc".into());
+    assert_eq!(query.borrow().as_str(), "abc");
+    assert_eq!(emissions.get(), 1);
+
+    notify_filter_query(&filter, &query, "ABC".into());
+    assert_eq!(query.borrow().as_str(), "abc");
+    assert_eq!(emissions.get(), 1);
+}
+
+#[test]
+fn notify_filter_query_skips_unchanged_folded_text() {
+    if std::env::var_os(FILTER_QUERY_GTK_CHILD).is_some() {
+        if gtk::init().is_err() {
+            return;
+        }
+        assert_notify_filter_query_skips_unchanged_folded_text();
+        return;
+    }
+
+    let status =
+        std::process::Command::new(std::env::current_exe().expect("test executable should exist"))
+            .args(["--exact", FILTER_QUERY_TEST])
+            .env(FILTER_QUERY_GTK_CHILD, "1")
+            .status()
+            .expect("isolated GTK filter-query test should start");
+    assert!(status.success(), "isolated GTK filter-query test failed");
+}
+
+const SCROLL_PIN_GTK_CHILD: &str = "STRATA_SCROLL_PIN_GTK_CHILD";
+const SCROLL_PIN_TEST: &str =
+    "ui::browser::tests::waiting_to_scroll_does_not_pin_an_unallocated_view";
+
+fn assert_waiting_to_scroll_does_not_pin_an_unallocated_view() {
+    let model = gtk::StringList::new(&["fv\talpha"]);
+    let selection = gtk::NoSelection::new(Some(model));
+    let list = gtk::ListView::new(Some(selection), Some(gtk::SignalListItemFactory::new()));
+    let weak = list.downgrade();
+    scroll_collection_when_allocated(list.upcast_ref(), 0);
+    drop(list);
+    while glib::MainContext::default().iteration(false) {}
+    assert!(
+        weak.upgrade().is_none(),
+        "deferred scroll must not pin the collection view"
+    );
+}
+
+#[test]
+fn waiting_to_scroll_does_not_pin_an_unallocated_view() {
+    if std::env::var_os(SCROLL_PIN_GTK_CHILD).is_some() {
+        if gtk::init().is_err() {
+            return;
+        }
+        assert_waiting_to_scroll_does_not_pin_an_unallocated_view();
+        return;
+    }
+
+    let status =
+        std::process::Command::new(std::env::current_exe().expect("test executable should exist"))
+            .args(["--exact", SCROLL_PIN_TEST])
+            .env(SCROLL_PIN_GTK_CHILD, "1")
+            .status()
+            .expect("isolated GTK scroll pin test should start");
+    assert!(status.success(), "isolated GTK scroll pin test failed");
+}
