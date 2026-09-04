@@ -8329,6 +8329,8 @@ fn request_permission_change(
     if editor.changing.replace(true) {
         return;
     }
+    let previous_mode = editor.mode.replace(Some(requested_mode));
+    update_permission_editor(&editor, requested_mode);
     set_permission_editor_sensitive(&editor, false);
     let attributes = gio::FileInfo::new();
     attributes.set_attribute_uint32("unix::mode", requested_mode & 0o7777);
@@ -8341,12 +8343,10 @@ fn request_permission_change(
             )
             .await
         {
-            Ok(_) => {
-                editor.mode.set(Some(requested_mode));
-                update_permission_editor(&editor, requested_mode);
-            }
+            Ok(_) => {}
             Err(error) => {
-                if let Some(mode) = editor.mode.get() {
+                if let Some(mode) = previous_mode {
+                    editor.mode.set(Some(mode));
                     update_permission_editor(&editor, mode);
                 }
                 tracing::warn!(%error, "unable to change file permissions");
