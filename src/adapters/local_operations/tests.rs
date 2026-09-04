@@ -269,11 +269,6 @@ fn staged_file_replacement_preserves_the_destination_on_disk_full() -> Result<()
     Ok(())
 }
 
-/// `WouldRecurse` is what GIO's own `move_async` returns for a directory it
-/// refuses to move across a filesystem boundary (issue #150); reproducing an
-/// actual cross-device move in a test would need a second real filesystem,
-/// so this injects the same failure `move_local_with`'s production caller
-/// would see from GIO in that situation.
 fn always_would_recurse() -> super::MoveAttempt {
     Rc::new(|_, _, _| {
         Box::pin(async {
@@ -366,10 +361,6 @@ fn a_successful_move_attempt_is_used_without_falling_back_to_copy() -> Result<()
     fs::create_dir_all(&source)?;
     fs::write(source.join("top.txt"), b"top")?;
 
-    // If a bug made `move_local_with` also run the fallback copy after a
-    // successful `attempt_move`, it would try to copy from `source` after
-    // this closure has already renamed it away -- failing with a
-    // source-not-found error instead of propagating this `Ok(())`.
     let result = glib::MainContext::default().block_on(move_local_with(
         gio::File::for_path(&source),
         gio::File::for_path(&target),
