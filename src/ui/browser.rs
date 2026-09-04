@@ -894,6 +894,16 @@ impl BrowserView {
         true
     }
 
+    pub fn duplicate_selection(&self) -> bool {
+        self.state.sync_mode_selection();
+        let entries = self.state.browser.selected_entries();
+        let Some((destination, sources)) = duplicate_transfer(&entries) else {
+            return false;
+        };
+        self.state.start_transfer(destination, sources, false);
+        true
+    }
+
     pub fn cut_selection(&self) -> bool {
         self.state.sync_mode_selection();
         let entries = self.state.browser.selected_entries();
@@ -6951,6 +6961,18 @@ fn terminal_destination_depth(
     hovered
         .filter(|depth| *depth < pane_count)
         .or_else(|| new_folder_destination_depth(focused, active, pane_count))
+}
+
+fn duplicate_transfer(entries: &[FileEntry]) -> Option<(Location, Vec<Location>)> {
+    let destination = entries.first()?.location.parent()?;
+    if !entries
+        .iter()
+        .all(|entry| entry.location.parent().as_ref() == Some(&destination))
+    {
+        return None;
+    }
+    let sources = entries.iter().map(|entry| entry.location.clone()).collect();
+    Some((destination, sources))
 }
 
 fn same_locations(left: &[Location], right: &[Location]) -> bool {
