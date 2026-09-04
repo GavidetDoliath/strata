@@ -353,6 +353,14 @@ pub fn present_location(application: &gtk::Application, location: Option<PathBuf
                 crate::services::UpdateMethod::InPlace => {
                     format!("Install Strata v{}", release.version)
                 }
+                crate::services::UpdateMethod::Aur => format!(
+                    "Strata v{} is available through {}",
+                    release.version,
+                    crate::services::InstallSource::detect()
+                        .managed()
+                        .map(crate::services::ManagedInstall::manager)
+                        .unwrap_or("your package manager")
+                ),
                 crate::services::UpdateMethod::Omarchy => {
                     format!("Strata v{} is available through Omarchy", release.version)
                 }
