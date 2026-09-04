@@ -1042,6 +1042,47 @@ fn valid_location_input_navigates_through_the_controller() {
 }
 
 #[test]
+fn location_input_expands_trimmed_home_relative_paths() {
+    let browser = Browser::new(Rc::new(FakeFileSource));
+    let home = glib::home_dir();
+
+    assert_eq!(browser.navigate_input("  ~  "), Ok(()));
+    assert_eq!(browser.active_location(), Some(Location::local(&home)));
+
+    assert_eq!(browser.navigate_input("  ~/Documents  "), Ok(()));
+    assert_eq!(
+        browser.active_location(),
+        Some(Location::local(home.join("Documents")))
+    );
+}
+
+#[test]
+fn home_relative_input_preserves_the_native_home_path() {
+    let home = Path::new("/home/fixture");
+
+    assert_eq!(
+        location_from_input_with_home("~", home),
+        Ok(Location::local("/home/fixture"))
+    );
+    assert_eq!(
+        location_from_input_with_home("~/Documents/project", home),
+        Ok(Location::local("/home/fixture/Documents/project"))
+    );
+    assert_eq!(
+        location_from_input_with_home("~//Documents", home),
+        Ok(Location::local("/home/fixture/Documents"))
+    );
+}
+
+#[test]
+fn other_users_home_shorthand_is_rejected() {
+    assert!(matches!(
+        location_from_input_with_home("~other-user/Documents", Path::new("/home/fixture")),
+        Err(LocationValidationError::UnsupportedShorthand(_))
+    ));
+}
+
+#[test]
 fn sidebar_location_navigation_validates_uris_but_navigates_native_paths_directly() {
     let remote_browser = Browser::new(Rc::new(NotMountedFileSource));
     let events = Rc::new(RefCell::new(Vec::new()));
@@ -1266,6 +1307,10 @@ fn invalid_location_text_is_rejected_before_the_provider() {
 
     assert_eq!(
         browser.navigate_input(""),
+        Err(LocationValidationError::Empty)
+    );
+    assert_eq!(
+        browser.navigate_input("   "),
         Err(LocationValidationError::Empty)
     );
     assert_eq!(

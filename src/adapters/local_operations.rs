@@ -272,21 +272,6 @@ type MoveAttempt = Rc<
     ) -> Pin<Box<dyn Future<Output = Result<(), glib::Error>>>>,
 >;
 
-/// Moves `source` to `target` via `attempt_move`, falling back to a safe
-/// recursive copy-then-delete when that attempt fails with
-/// [`gio::IOErrorEnum::WouldRecurse`].
-///
-/// `g_file_move` renames when it can, but for a directory it never silently
-/// recurses to cross a filesystem boundary -- it returns `WouldRecurse`
-/// instead of doing a partial, unsafe copy. [`copy_new_recursively`] already
-/// implements that recursive copy safely (staged in a sibling, then renamed
-/// into place, with the staging area cleaned up on any failure), so the
-/// fallback here reuses it rather than duplicating that staging logic; the
-/// source is only deleted once the copy has fully and durably succeeded.
-///
-/// `attempt_move` is a parameter, mirroring [`replace_local_with`], so a test
-/// can inject a `WouldRecurse` (or any other) failure without needing an
-/// actual second filesystem to reproduce it.
 async fn move_local_with(
     source: gio::File,
     target: gio::File,
