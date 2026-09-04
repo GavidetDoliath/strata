@@ -12,6 +12,7 @@ fn terminal_shortcut_prefers_one_selected_directory() {
         size: crate::model::MetadataValue::Unknown,
         modified_unix_seconds: crate::model::MetadataValue::Unknown,
         is_hidden: false,
+        mode: crate::model::MetadataValue::Unknown,
     };
     let directory = entry("selected", crate::model::EntryKind::Directory);
     let file = entry("notes.txt", crate::model::EntryKind::File);
@@ -34,6 +35,7 @@ fn duplicate_transfer_uses_the_selected_entries_parent() {
         kind: crate::model::EntryKind::File,
         size: crate::model::MetadataValue::Unknown,
         modified_unix_seconds: crate::model::MetadataValue::Unknown,
+        mode: crate::model::MetadataValue::Unknown,
         is_hidden: false,
     };
     let first = entry("/fixture/selected/first.txt");
@@ -213,6 +215,7 @@ fn delete_confirmation_labels_distinguish_files_and_folders() {
         size: crate::model::MetadataValue::Known(10),
         modified_unix_seconds: crate::model::MetadataValue::Unknown,
         is_hidden: false,
+        mode: crate::model::MetadataValue::Unknown,
     };
     let mut folder = file.clone();
     folder.kind = crate::model::EntryKind::Directory;
@@ -384,6 +387,7 @@ fn quick_preview_is_offered_only_for_supported_files() {
         size: crate::model::MetadataValue::Unknown,
         modified_unix_seconds: crate::model::MetadataValue::Unknown,
         is_hidden: false,
+        mode: crate::model::MetadataValue::Unknown,
     };
 
     assert!(entry_supports_quick_preview(&entry(
@@ -425,6 +429,7 @@ fn printing_is_offered_for_text_code_images_and_pdfs() {
         kind,
         size: crate::model::MetadataValue::Unknown,
         modified_unix_seconds: crate::model::MetadataValue::Unknown,
+        mode: crate::model::MetadataValue::Unknown,
         is_hidden: false,
     };
 
@@ -524,6 +529,7 @@ fn multi_selection_summary_lists_at_most_three_names() {
         size: crate::model::MetadataValue::Unknown,
         modified_unix_seconds: crate::model::MetadataValue::Unknown,
         is_hidden: false,
+        mode: crate::model::MetadataValue::Unknown,
     };
 
     assert_eq!(
@@ -1320,6 +1326,7 @@ fn entry_model_value_encodes_hidden_state_and_preserves_display_name() {
         size: crate::model::MetadataValue::Unknown,
         modified_unix_seconds: crate::model::MetadataValue::Unknown,
         is_hidden: false,
+        mode: crate::model::MetadataValue::Unknown,
     };
     let hidden = FileEntry {
         location: Location::local("/fixture/.config"),
@@ -1329,6 +1336,7 @@ fn entry_model_value_encodes_hidden_state_and_preserves_display_name() {
         size: crate::model::MetadataValue::Unknown,
         modified_unix_seconds: crate::model::MetadataValue::Unknown,
         is_hidden: true,
+        mode: crate::model::MetadataValue::Unknown,
     };
 
     let encoded_visible = entry_model_value(&visible);
@@ -1397,6 +1405,7 @@ fn pinning_requires_an_available_non_trash_directory() {
         size: crate::model::MetadataValue::Unknown,
         modified_unix_seconds: crate::model::MetadataValue::Unknown,
         is_hidden: false,
+        mode: crate::model::MetadataValue::Unknown,
     };
     let directory = entry(
         Location::local("/fixture/folder"),
@@ -1459,6 +1468,7 @@ fn retryable_delete_entries_keeps_only_the_named_locations() {
         size: crate::model::MetadataValue::Unknown,
         modified_unix_seconds: crate::model::MetadataValue::Unknown,
         is_hidden: false,
+        mode: crate::model::MetadataValue::Unknown,
     };
     let retryable = entry("share-file.txt");
     let denied = entry("locked-file.txt");
@@ -1479,6 +1489,7 @@ fn retryable_delete_entries_is_empty_when_nothing_matches() {
         size: crate::model::MetadataValue::Unknown,
         modified_unix_seconds: crate::model::MetadataValue::Unknown,
         is_hidden: false,
+        mode: crate::model::MetadataValue::Unknown,
     };
 
     let kept = retryable_delete_entries(vec![entry], &[]);
