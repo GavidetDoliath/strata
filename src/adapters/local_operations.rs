@@ -896,6 +896,201 @@ fn permanently_delete(
     })
 }
 
+/// The outcome of resolving one delete target relative to its parent
+/// directory's file descriptor.
+enum LocalDeleteStep {
+    /// A non-directory entry (file, symlink, or other special file) that has
+    /// already been unlinked.
+    Removed,
+    /// A directory that was opened (not yet removed) along with its
+    /// immediate children, still to be deleted before the directory itself.
+    Directory {
+        handle: OwnedFd,
+        children: Vec<OsString>,
+    },
+}
+
+/// Fails closed if an opened directory is no longer at its original name.
+fn ensure_local_delete_target_unchanged<ParentFd: AsFd, TargetFd: AsFd>(
+    parent: &ParentFd,
+    name: &OsStr,
+    target: &TargetFd,
+) -> Result<(), String> {
+    let named = rustix::fs::statat(parent, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW).map_err(
+        |error| {
+            format!(
+                "{} changed while it was being deleted: {error}",
+                name.to_string_lossy()
+            )
+        },
+    )?;
+    let opened = rustix::fs::fstat(target)
+        .map_err(|error| format!("Could not recheck {}: {error}", name.to_string_lossy()))?;
+    if named.st_dev != opened.st_dev || named.st_ino != opened.st_ino {
+        return Err(format!(
+            "{} changed while it was being deleted",
+            name.to_string_lossy()
+        ));
+    }
+    Ok(())
+}
+
+/// Inspects and, for non-directories, immediately deletes the entry named
+/// `name` inside `parent`. The type is re-read from disk here rather than
+/// trusted from any earlier listing.
+fn open_local_delete_target<Fd: AsFd>(
+    parent: &Fd,
+    name: &OsStr,
+) -> Result<LocalDeleteStep, String> {
+    let stat = rustix::fs::statat(parent, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)
+        .map_err(|error| format!("Could not inspect {}: {error}", name.to_string_lossy()))?;
+    if !matches!(
+        rustix::fs::FileType::from_raw_mode(stat.st_mode),
+        rustix::fs::FileType::Directory
+    ) {
+        rustix::fs::unlinkat(parent, name, rustix::fs::AtFlags::empty())
+            .map_err(|error| format!("Could not delete {}: {error}", name.to_string_lossy()))?;
+        return Ok(LocalDeleteStep::Removed);
+    }
+    // RESOLVE_NO_SYMLINKS (stronger than O_NOFOLLOW) plus RESOLVE_BENEATH and
+    // RESOLVE_NO_MAGICLINKS: if `name` changed to a symlink (or a magic link)
+    // in the moment since the statat above, this fails closed instead of
+    // opening whatever it now points to.
+    let handle = rustix::fs::openat2(
+        parent,
+        name,
+        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::DIRECTORY | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+        rustix::fs::ResolveFlags::BENEATH
+            | rustix::fs::ResolveFlags::NO_SYMLINKS
+            | rustix::fs::ResolveFlags::NO_MAGICLINKS,
+    )
+    .map_err(|error| {
+        format!(
+            "{} changed while it was being deleted: {error}",
+            name.to_string_lossy()
+        )
+    })?;
+    let mut children = Vec::new();
+    for entry in rustix::fs::Dir::read_from(&handle).map_err(|error| error.to_string())? {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let entry_name = entry.file_name();
+        if entry_name == c"." || entry_name == c".." {
+            continue;
+        }
+        children.push(OsString::from_vec(entry_name.to_bytes().to_vec()));
+    }
+    Ok(LocalDeleteStep::Directory { handle, children })
+}
+
+fn cancelled_local_delete() -> glib::Error {
+    glib::Error::new(gio::IOErrorEnum::Cancelled, "Delete cancelled")
+}
+
+async fn run_local_delete_step<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> Result<T, glib::Error> {
+    gio::spawn_blocking(work)
+        .await
+        .map_err(|_| io_error("Delete task panicked"))?
+        .map_err(io_error)
+}
+
+/// Recursively and permanently deletes the entry named `name` inside
+/// `parent`, walking descriptor-relative to each already-open directory
+/// rather than re-resolving paths, so a component swapped out from under an
+/// in-progress delete cannot redirect it outside the tree it started in.
+fn permanently_delete_local(
+    parent: OwnedFd,
+    name: OsString,
+    cancellable: gio::Cancellable,
+) -> Pin<Box<dyn Future<Output = Result<(), glib::Error>>>> {
+    Box::pin(async move {
+        if cancellable.is_cancelled() {
+            return Err(cancelled_local_delete());
+        }
+        let step_parent = parent.try_clone().map_err(io_error)?;
+        let step_name = name.clone();
+        let step =
+            run_local_delete_step(move || open_local_delete_target(&step_parent, &step_name))
+                .await?;
+        let LocalDeleteStep::Directory { handle, children } = step else {
+            return Ok(());
+        };
+        for child in children {
+            if cancellable.is_cancelled() {
+                return Err(cancelled_local_delete());
+            }
+            let checked_parent = parent.try_clone().map_err(io_error)?;
+            let checked_handle = handle.try_clone().map_err(io_error)?;
+            let checked_name = name.clone();
+            run_local_delete_step(move || {
+                ensure_local_delete_target_unchanged(
+                    &checked_parent,
+                    &checked_name,
+                    &checked_handle,
+                )
+            })
+            .await?;
+            let child_parent = handle.try_clone().map_err(io_error)?;
+            permanently_delete_local(child_parent, child, cancellable.clone()).await?;
+        }
+        run_local_delete_step(move || {
+            ensure_local_delete_target_unchanged(&parent, &name, &handle)?;
+            rustix::fs::unlinkat(&parent, &name, rustix::fs::AtFlags::REMOVEDIR)
+                .map_err(|error| format!("Could not delete {}: {error}", name.to_string_lossy()))
+        })
+        .await
+    })
+}
+
+fn open_local_delete_parent(parent_path: &Path) -> Result<OwnedFd, String> {
+    if !parent_path.is_absolute() {
+        return Err("A local delete target must use an absolute path".to_owned());
+    }
+    let root = rustix::fs::open(
+        c"/",
+        rustix::fs::OFlags::PATH | rustix::fs::OFlags::DIRECTORY | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    )
+    .map_err(|error| format!("Could not open the filesystem root: {error}"))?;
+    let relative = parent_path
+        .strip_prefix(Path::new("/"))
+        .map_err(|_| "A local delete target must use an absolute path".to_owned())?;
+    if relative.as_os_str().is_empty() {
+        return Ok(root);
+    }
+    rustix::fs::openat2(
+        &root,
+        relative,
+        rustix::fs::OFlags::PATH | rustix::fs::OFlags::DIRECTORY | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+        rustix::fs::ResolveFlags::BENEATH
+            | rustix::fs::ResolveFlags::NO_SYMLINKS
+            | rustix::fs::ResolveFlags::NO_MAGICLINKS,
+    )
+    .map_err(|error| format!("Could not safely open {}: {error}", parent_path.display()))
+}
+
+/// Entry point for permanently deleting a local path: opens the target's
+/// parent directory once, then hands off to the descriptor-relative walk in
+/// [`permanently_delete_local`] for everything below it.
+fn permanently_delete_local_path(
+    path: PathBuf,
+    cancellable: gio::Cancellable,
+) -> Pin<Box<dyn Future<Output = Result<(), glib::Error>>>> {
+    Box::pin(async move {
+        let Some(parent_path) = path.parent().map(Path::to_path_buf) else {
+            return Err(io_error("Cannot permanently delete the filesystem root"));
+        };
+        let Some(name) = path.file_name().map(OsStr::to_os_string) else {
+            return Err(io_error("Invalid delete target"));
+        };
+        let parent = run_local_delete_step(move || open_local_delete_parent(&parent_path)).await?;
+        permanently_delete_local(parent, name, cancellable).await
+    })
+}
+
 fn operation_error_summary(errors: &[String], action: &str) -> String {
     let mut summary = format!(
         "{} could not be {action}. The remaining items were processed.",
@@ -1597,7 +1792,16 @@ impl OperationProvider for LocalOperationProvider {
                             },
                         )
                         .await
+                    } else if let Some(native_path) = entry.location.native_path() {
+                        permanently_delete_local_path(
+                            native_path.to_path_buf(),
+                            operation_cancellable.clone(),
+                        )
+                        .await
                     } else {
+                        // Remote (GVfs) locations have no local file descriptor to
+                        // walk against, so this falls back to the path-based
+                        // GIO delete rather than claiming an equivalent guarantee.
                         permanently_delete(
                             file,
                             entry.is_directory(),
