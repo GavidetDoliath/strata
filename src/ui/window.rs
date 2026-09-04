@@ -39,6 +39,40 @@ enum MouseHistoryAction {
     Forward,
 }
 
+#[derive(Clone)]
+struct TypeToSearch {
+    dialog: SearchDialog,
+    button: gtk::Button,
+    blurred_root: BlurBin,
+    controller: Rc<Browser>,
+    preferences: Rc<super::theme::ThemeManager>,
+}
+
+impl TypeToSearch {
+    fn is_enabled(&self) -> bool {
+        self.preferences.type_to_search()
+    }
+
+    fn show(&self, query: char) {
+        let dialog = self.dialog.clone();
+        let button = self.button.clone();
+        let blurred_root = self.blurred_root.clone();
+        let controller = self.controller.clone();
+        glib::idle_add_local_once(move || {
+            if dialog.is_visible() {
+                return;
+            }
+            let root = controller
+                .active_location()
+                .and_then(|location| location.native_path().map(std::path::Path::to_path_buf))
+                .unwrap_or_else(home_directory);
+            button.add_css_class("active");
+            blurred_root.set_blurred(true);
+            dialog.show_with_query(root, &query.to_string());
+        });
+    }
+}
+
 fn mouse_history_action(button: u32) -> Option<MouseHistoryAction> {
     match button {
         8 => Some(MouseHistoryAction::Back),
@@ -271,9 +305,11 @@ pub fn present_location(application: &gtk::Application, location: Option<PathBuf
     });
     let dismissed_search_root = blurred_root.clone();
     let dismissed_search_button = search_button.clone();
+    let dismissed_search_browser = controller.clone();
     let dismiss_search = Rc::new(move || {
         dismissed_search_root.set_blurred(false);
         dismissed_search_button.remove_css_class("active");
+        dismissed_search_browser.focus_active();
     });
     let search_dialog = SearchDialog::new(activate_search_result, dismiss_search);
     window_overlay.add_overlay(&search_dialog.widget());
@@ -458,7 +494,21 @@ pub fn present_location(application: &gtk::Application, location: Option<PathBuf
     });
     window.add_controller(rename_cancel);
     install_modal_focus_trap(&window);
-    install_keyboard_navigation(&window, &browser, &sidebar, &sidebar_toggle, &preview);
+    let type_to_search = TypeToSearch {
+        dialog: search_dialog.clone(),
+        button: search_button.clone(),
+        blurred_root: blurred_root.clone(),
+        controller: controller.clone(),
+        preferences: theme_manager.clone(),
+    };
+    install_keyboard_navigation(
+        &window,
+        &browser,
+        &sidebar,
+        &sidebar_toggle,
+        &preview,
+        &type_to_search,
+    );
     let browser_controller = browser.browser();
     schedule_after_first_paint(&window, &sidebar);
     window.connect_destroy(move |_| {
@@ -579,6 +629,7 @@ fn install_keyboard_navigation(
     sidebar: &SidebarView,
     sidebar_toggle: &gtk::ToggleButton,
     preview: &PreviewDrawer,
+    type_to_search: &TypeToSearch,
 ) {
     let keys = gtk::EventControllerKey::new();
     keys.set_propagation_phase(gtk::PropagationPhase::Capture);
@@ -587,6 +638,7 @@ fn install_keyboard_navigation(
     let sidebar_widget = sidebar.widget.clone();
     let sidebar_toggle = sidebar_toggle.clone();
     let preview = preview.clone();
+    let type_to_search = type_to_search.clone();
     let dialog_parent = window.clone();
     let focus_before_sidebar = Rc::new(RefCell::new(None::<gtk::Widget>));
     let weak_browser = Rc::downgrade(&view.browser());
@@ -700,6 +752,13 @@ fn install_keyboard_navigation(
             return glib::Propagation::Proceed;
         }
         if !text_has_focus && is_undo_trash_shortcut(key, modifiers) && view.undo_last_trash() {
+            return glib::Propagation::Stop;
+        }
+        if type_to_search.is_enabled()
+            && view.item_view_has_focus()
+            && let Some(query) = type_to_search_query(key, modifiers)
+        {
+            type_to_search.show(query);
             return glib::Propagation::Stop;
         }
         if alt
@@ -894,6 +953,17 @@ fn is_undo_trash_shortcut(key: gtk::gdk::Key, modifiers: gtk::gdk::ModifierType)
         && !modifiers
             .intersects(gtk::gdk::ModifierType::SHIFT_MASK | gtk::gdk::ModifierType::ALT_MASK)
         && matches!(key, gtk::gdk::Key::z | gtk::gdk::Key::Z)
+}
+
+fn type_to_search_query(key: gtk::gdk::Key, modifiers: gtk::gdk::ModifierType) -> Option<char> {
+    if modifiers.intersects(
+        gtk::gdk::ModifierType::CONTROL_MASK
+            | gtk::gdk::ModifierType::ALT_MASK
+            | gtk::gdk::ModifierType::SUPER_MASK,
+    ) {
+        return None;
+    }
+    key.to_unicode().filter(|character| !character.is_control())
 }
 
 fn is_open_terminal_shortcut(key: gtk::gdk::Key, modifiers: gtk::gdk::ModifierType) -> bool {
