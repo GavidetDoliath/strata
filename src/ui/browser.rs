@@ -4577,6 +4577,13 @@ impl ViewState {
             };
             let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
             row.add_css_class("file-row");
+            row.add_css_class("file-appear");
+            let weak_row = row.downgrade();
+            glib::idle_add_local_once(move || {
+                if let Some(row) = weak_row.upgrade() {
+                    row.remove_css_class("file-appear");
+                }
+            });
             let icon = gtk::Image::new();
             icon.add_css_class("file-icon");
             icon.set_pixel_size(17);
@@ -4653,7 +4660,9 @@ impl ViewState {
             let weak_state_for_drag = weak_state.clone();
             let dragged_item = item.clone();
             let map_for_drag = map_for_hover.clone();
+            let prepare_row = row.clone();
             drag.connect_prepare(move |source, x, y| {
+                prepare_row.remove_css_class("slide-out");
                 let state = weak_state_for_drag.upgrade()?;
                 let source_position = map_for_drag.source_position(dragged_item.position())?;
                 let entry = state.browser.entry_at(depth, source_position)?;
@@ -4673,15 +4682,25 @@ impl ViewState {
             let dragged_row = row.clone();
             drag.connect_drag_begin(move |_, _| dragged_row.add_css_class("dragging"));
             let dragged_row = row.clone();
-            drag.connect_drag_end(move |_, _, _| dragged_row.remove_css_class("dragging"));
+            drag.connect_drag_end(move |_, _, _| {
+                dragged_row.remove_css_class("dragging");
+                slide_out(&dragged_row);
+            });
             row.add_controller(drag);
 
             let drop = gtk::DropTarget::new(
                 gtk::gdk::FileList::static_type(),
                 gtk::gdk::DragAction::COPY | gtk::gdk::DragAction::MOVE,
             );
-            drop.connect_enter(|target, _, _| file_drop_action(target));
-            drop.connect_motion(|target, _, _| file_drop_action(target));
+            let highlighted_row = row.clone();
+            let highlight = move |target: &gtk::DropTarget, _, _| {
+                highlighted_row.add_css_class("drop-destination");
+                file_drop_action(target)
+            };
+            drop.connect_enter(highlight.clone());
+            drop.connect_motion(highlight);
+            let highlighted_row = row.clone();
+            drop.connect_leave(move |_| highlighted_row.remove_css_class("drop-destination"));
             let weak_state_for_accept = weak_state.clone();
             let accepted_item = item.clone();
             let map_for_accept = map_for_hover.clone();
@@ -4702,7 +4721,9 @@ impl ViewState {
             let weak_state_for_drop = weak_state.clone();
             let dropped_item = item.clone();
             let map_for_drop = map_for_hover.clone();
+            let dropped_row = row.clone();
             drop.connect_drop(move |target, value, _, _| {
+                dropped_row.remove_css_class("drop-destination");
                 let Some(state) = weak_state_for_drop.upgrade() else {
                     return false;
                 };
@@ -4714,7 +4735,15 @@ impl ViewState {
                 else {
                     return false;
                 };
-                transfer_dropped_files(&state, target, value, destination)
+                let Some(sources) = locations_from_file_list_value(value) else {
+                    return false;
+                };
+                let move_sources = file_drop_action(target) == gtk::gdk::DragAction::MOVE;
+                slide_in_down(&dropped_row);
+                glib::timeout_add_local_once(Duration::from_millis(300), move || {
+                    state.start_transfer(destination, sources, move_sources);
+                });
+                true
             });
             row.add_controller(drop);
 
@@ -8267,6 +8296,30 @@ pub(super) fn animate_in(layer: &gtk::Box) {
 pub(super) fn animate_out(layer: &gtk::Box, on_done: impl FnOnce() + 'static) {
     layer.add_css_class("modal-hidden");
     glib::timeout_add_local_once(Duration::from_millis(200), on_done);
+}
+
+pub(super) fn slide_out(widget: &impl IsA<gtk::Widget>) {
+    let w = widget.as_ref();
+    w.remove_css_class("slide-out");
+    w.add_css_class("slide-out");
+    let weak = w.downgrade();
+    glib::timeout_add_local_once(Duration::from_millis(240), move || {
+        if let Some(w) = weak.upgrade() {
+            w.remove_css_class("slide-out");
+        }
+    });
+}
+
+pub(super) fn slide_in_down(widget: &impl IsA<gtk::Widget>) {
+    let w = widget.as_ref();
+    w.remove_css_class("just-dropped");
+    w.add_css_class("just-dropped");
+    let weak = w.downgrade();
+    glib::timeout_add_local_once(Duration::from_millis(200), move || {
+        if let Some(w) = weak.upgrade() {
+            w.remove_css_class("just-dropped");
+        }
+    });
 }
 
 pub(super) fn dismiss_modal_layer(
