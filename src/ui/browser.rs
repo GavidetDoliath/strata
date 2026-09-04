@@ -85,6 +85,10 @@ struct ColumnView {
     new_entry_entry: gtk::Entry,
     show_hidden: Rc<Cell<bool>>,
     filter: gtk::CustomFilter,
+    search_results: Rc<RefCell<Vec<crate::services::SearchItem>>>,
+    search_handle: Rc<RefCell<Option<crate::services::SearchHandle>>>,
+    search_generation: Rc<Cell<u64>>,
+    search_model: gtk::StringList,
 }
 
 struct ActiveRename {
@@ -4023,6 +4027,15 @@ impl ViewState {
             }
             BrowserEvent::ColumnReloaded { depth } => {
                 if let Some(column) = self.columns.borrow().get(*depth) {
+                    column.search_handle.borrow_mut().take();
+                    column
+                        .search_generation
+                        .set(column.search_generation.get().saturating_add(1));
+                    column.search_results.borrow_mut().clear();
+                    column
+                        .search_model
+                        .splice(0, column.search_model.n_items(), &[]);
+                    column.filter_entry.set_text("");
                     column.syncing_selection.set(true);
                     column.selection.set_model(None::<&gio::ListModel>);
                     touch_source_model(column);
@@ -4593,6 +4606,7 @@ impl ViewState {
             None,
         );
         let selection = gtk::MultiSelection::new(Some(filtered_model.clone()));
+        let recursive_search_active = Rc::new(Cell::new(false));
         let syncing_selection = Rc::new(Cell::new(false));
         let modified_selection = Rc::new(Cell::new(false));
         let focused_filtered = Rc::new(Cell::new(None::<u32>));
@@ -4601,8 +4615,9 @@ impl ViewState {
         let syncing_selection_changed = syncing_selection.clone();
         let focused_filtered_changed = focused_filtered.clone();
         let filter_for_column = filter.clone();
+        let search_active_for_selection = recursive_search_active.clone();
         selection.connect_selection_changed(move |selection, position, count| {
-            if syncing_selection_changed.get() {
+            if syncing_selection_changed.get() || search_active_for_selection.get() {
                 return;
             }
             let filtered_positions = bitset_positions(&selection.selection());
@@ -4633,38 +4648,110 @@ impl ViewState {
                 browser.set_selection(depth, &source_positions, focused_source);
             }
         });
-        let map_for_filter = map.clone();
-        let query_for_filter = filter_query.clone();
-        let filter_for_settled = filter.clone();
-        let model_for_filter = filtered_model.clone();
-        let weak_state_for_filter = Rc::downgrade(self);
-        let selection_for_filter = selection.clone();
-        let syncing_for_filter = syncing_selection.clone();
+        let search_results: Rc<RefCell<Vec<crate::services::SearchItem>>> =
+            Rc::new(RefCell::new(Vec::new()));
+        let search_handle: Rc<RefCell<Option<crate::services::SearchHandle>>> =
+            Rc::new(RefCell::new(None));
+        let search_generation: Rc<Cell<u64>> = Rc::new(Cell::new(0));
+        let search_model = gtk::StringList::new(&[]);
+
+        let weak_state_for_search = Rc::downgrade(self);
+        let depth_for_search = depth;
+        let filtered_model_for_search = filtered_model.clone();
+        let model_for_search = model.clone();
+        let search_model_for_changed = search_model.clone();
+        let search_results_for_changed = search_results.clone();
+        let search_handle_for_changed = search_handle.clone();
+        let search_gen_for_changed = search_generation.clone();
+        let search_active_for_changed = recursive_search_active.clone();
+        let weak_filter_entry = filter_entry.downgrade();
         debounce_filter_entry(&filter_entry, move |text| {
-            let settled = text.to_lowercase();
-            apply_filter_query(
-                &model_for_filter,
-                &filter_for_settled,
-                &query_for_filter,
-                settled,
-            );
-            let Some(state) = weak_state_for_filter.upgrade() else {
-                return;
-            };
-            let positions: Vec<u32> = state
-                .browser
-                .selected_positions(depth)
-                .into_iter()
-                .filter_map(|position| map_for_filter.view_position(position))
-                .collect();
-            if let Some(column) = state.columns.borrow().get(depth) {
-                syncing_for_filter.set(true);
-                apply_selection_plan(
-                    &selection_for_filter,
-                    column.filtered_model.n_items(),
-                    &positions,
+            let query = text.trim().to_string();
+            search_gen_for_changed.set(search_gen_for_changed.get().saturating_add(1));
+            if query.is_empty() {
+                search_handle_for_changed.borrow_mut().take();
+                search_results_for_changed.borrow_mut().clear();
+                search_model_for_changed.splice(0, search_model_for_changed.n_items(), &[]);
+                if filtered_model_for_search.model().as_ref()
+                    != Some(model_for_search.upcast_ref::<gio::ListModel>())
+                {
+                    filtered_model_for_search.set_model(Some(&model_for_search));
+                }
+                apply_filter_query(
+                    &filtered_model_for_search,
+                    &filter,
+                    &filter_query,
+                    text.to_lowercase(),
                 );
-                syncing_for_filter.set(false);
+                search_active_for_changed.set(false);
+                return;
+            }
+            *filter_query.borrow_mut() = text.to_lowercase();
+            search_active_for_changed.set(true);
+            let weak_entry = weak_filter_entry.clone();
+            let weak_state = weak_state_for_search.clone();
+            let filtered = filtered_model_for_search.clone();
+            let sm = search_model_for_changed.clone();
+            let results = search_results_for_changed.clone();
+            let handle = search_handle_for_changed.clone();
+            let search_gen = search_gen_for_changed.clone();
+            if handle.borrow().is_none() {
+                let Some(state) = weak_state.upgrade() else {
+                    return;
+                };
+                let Some(path) = state
+                    .browser
+                    .location_at(depth_for_search)
+                    .and_then(|loc| loc.native_path().map(Path::to_path_buf))
+                else {
+                    return;
+                };
+                search_gen.set(search_gen.get().saturating_add(1));
+                let poll_gen = search_gen.get();
+                let (h, receiver) = crate::services::index_tree(path);
+                handle.replace(Some(h));
+                filtered.set_filter(None::<&gtk::CustomFilter>);
+                filtered.set_model(Some(&sm));
+                let weak_entry = weak_entry.clone();
+                let weak_sm = sm.downgrade();
+                let weak_filtered = filtered.downgrade();
+                let results = results.clone();
+                let gen_check = search_gen.clone();
+                let _poll = glib::timeout_add_local(Duration::from_millis(16), move || {
+                    if gen_check.get() != poll_gen {
+                        return glib::ControlFlow::Break;
+                    }
+                    let mut latest = None;
+                    for _ in 0..8 {
+                        match receiver.try_recv() {
+                            Ok(event) => latest = Some(event),
+                            Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                                return glib::ControlFlow::Break;
+                            }
+                        }
+                    }
+                    if let Some(crate::services::SearchEvent::Results { query, items, .. }) = latest
+                        && let Some(entry) = weak_entry.upgrade()
+                        && !query.is_empty()
+                        && query == entry.text().trim()
+                    {
+                        let Some(sm) = weak_sm.upgrade() else {
+                            return glib::ControlFlow::Break;
+                        };
+                        let labels: Vec<_> = items.iter().map(|item| item.name.clone()).collect();
+                        results.replace(items);
+                        let labels: Vec<_> = labels.iter().map(String::as_str).collect();
+                        sm.splice(0, sm.n_items(), &labels);
+                        if let Some(fm) = weak_filtered.upgrade() {
+                            fm.items_changed(0, sm.n_items(), sm.n_items());
+                        }
+                    }
+                    glib::ControlFlow::Continue
+                });
+            }
+            if let Some(h) = handle.borrow().as_ref() {
+                h.query(&query);
             }
         });
 
@@ -4942,6 +5029,8 @@ impl ViewState {
         });
         let map_for_bind = map.clone();
         let weak_state_for_bind = Rc::downgrade(self);
+        let search_active_for_bind = recursive_search_active.clone();
+        let search_results_for_bind = search_results.clone();
         factory.connect_bind(move |_, item| {
             let Some(item) = item.downcast_ref::<gtk::ListItem>() else {
                 return;
@@ -4980,10 +5069,33 @@ impl ViewState {
             rename.set_visible(false);
             label.set_visible(true);
             spacer.set_visible(true);
-            let source_position = map_for_bind.source_position(item.position());
+            let searching = search_active_for_bind.get();
+            let source_position = (!searching)
+                .then(|| map_for_bind.source_position(item.position()))
+                .flatten();
             let state = weak_state_for_bind.upgrade();
             let browser = state.as_ref().map(|state| &state.browser);
-            let entry = source_position.and_then(|position| browser?.entry_at(depth, position));
+            let entry = if searching {
+                search_results_for_bind
+                    .borrow()
+                    .get(item.position() as usize)
+                    .map(|item| FileEntry {
+                        location: Location::local(item.path.clone()),
+                        native_name: item.path.file_name().unwrap_or_default().to_os_string(),
+                        display_name: item.name.clone(),
+                        kind: if item.is_directory {
+                            EntryKind::Directory
+                        } else {
+                            EntryKind::File
+                        },
+                        size: crate::model::MetadataValue::Unknown,
+                        modified_unix_seconds: crate::model::MetadataValue::Unknown,
+                        is_hidden: false,
+                        mode: crate::model::MetadataValue::Unknown,
+                    })
+            } else {
+                source_position.and_then(|position| browser?.entry_at(depth, position))
+            };
             let active = source_position.is_some_and(|position| {
                 browser
                     .as_ref()
@@ -5000,11 +5112,12 @@ impl ViewState {
                 }),
             );
             if let Some(entry) = entry.as_ref() {
-                // Hidden views bind, but only the visible mode earns decodes and fills.
                 let mode_active = state
                     .as_ref()
                     .is_some_and(|state| state.mode_views.borrow().mode() == BrowserMode::Columns);
-                if mode_active {
+                if entry.is_directory() {
+                    super::thumbnail::show_fallback_icon(&icon, crate::assets::icons::FOLDER, 17);
+                } else if mode_active {
                     super::thumbnail::set_thumbnail_or_icon(
                         &icon,
                         entry,
@@ -5042,6 +5155,61 @@ impl ViewState {
         list.set_enable_rubberband(false);
         list.set_single_click_activate(false);
         list.set_vexpand(true);
+
+        let search_navigation = gtk::EventControllerKey::new();
+        search_navigation.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let search_active_for_navigation = recursive_search_active.clone();
+        let selection_for_navigation = selection.clone();
+        let syncing_for_navigation = syncing_selection.clone();
+        let list_for_navigation = list.clone();
+        let browser_for_navigation = Rc::downgrade(&self.browser);
+        let results_for_navigation = search_results.clone();
+        search_navigation.connect_key_pressed(move |_, key, _, modifiers| {
+            if !search_active_for_navigation.get()
+                || modifiers.intersects(
+                    gtk::gdk::ModifierType::CONTROL_MASK
+                        | gtk::gdk::ModifierType::ALT_MASK
+                        | gtk::gdk::ModifierType::SUPER_MASK
+                        | gtk::gdk::ModifierType::SHIFT_MASK,
+                )
+            {
+                return glib::Propagation::Proceed;
+            }
+            let current = bitset_positions(&selection_for_navigation.selection())
+                .last()
+                .copied();
+            if recursive_search_activation_key(key) {
+                return if current.is_some_and(|position| {
+                    activate_recursive_search_result(
+                        &browser_for_navigation,
+                        &results_for_navigation,
+                        position,
+                    )
+                }) {
+                    glib::Propagation::Stop
+                } else {
+                    glib::Propagation::Proceed
+                };
+            }
+            let direction = match key {
+                gtk::gdk::Key::Down => 1,
+                gtk::gdk::Key::Up => -1,
+                _ => return glib::Propagation::Proceed,
+            };
+            let Some(next) = search_result_navigation_position(
+                current,
+                selection_for_navigation.n_items(),
+                direction,
+            ) else {
+                return glib::Propagation::Stop;
+            };
+            syncing_for_navigation.set(true);
+            selection_for_navigation.select_item(next, true);
+            syncing_for_navigation.set(false);
+            list_for_navigation.scroll_to(next, gtk::ListScrollFlags::empty(), None);
+            glib::Propagation::Stop
+        });
+        filter_entry.add_controller(search_navigation);
 
         let clear_selection = gtk::GestureClick::new();
         clear_selection.set_button(1);
@@ -5081,7 +5249,17 @@ impl ViewState {
 
         let weak_browser = Rc::downgrade(&self.browser);
         let map_for_activation = map.clone();
+        let search_handle_for_activate = search_handle.clone();
+        let search_results_for_activate = search_results.clone();
         list.connect_activate(move |_, position| {
+            if search_handle_for_activate.borrow().is_some() {
+                activate_recursive_search_result(
+                    &weak_browser,
+                    &search_results_for_activate,
+                    position,
+                );
+                return;
+            }
             let source_position = map_for_activation.source_position(position);
             if let (Some(browser), Some(source_position)) =
                 (weak_browser.upgrade(), source_position)
@@ -5284,6 +5462,10 @@ impl ViewState {
             new_entry_entry,
             show_hidden,
             filter: filter_for_column,
+            search_results,
+            search_handle,
+            search_generation,
+            search_model,
         });
 
         if let Some(column) = self.columns.borrow().last() {
@@ -5692,7 +5874,7 @@ fn set_filter_placeholder(column: &ColumnView, count: usize) {
         .set_placeholder_text(Some(&format!("Filter {count} {noun}…")));
 }
 
-pub(crate) const FILTER_DEBOUNCE_DELAY: Duration = Duration::from_millis(60);
+pub(crate) const FILTER_DEBOUNCE_DELAY: Duration = Duration::from_millis(200);
 
 pub(crate) fn debounce_filter_entry(entry: &gtk::Entry, on_settled: impl Fn(String) + 'static) {
     let pending: Rc<RefCell<Option<glib::SourceId>>> = Rc::new(RefCell::new(None));
@@ -5856,6 +6038,48 @@ impl ViewMap {
             })
             .collect()
     }
+}
+
+pub(crate) fn recursive_search_activation_key(key: gtk::gdk::Key) -> bool {
+    matches!(
+        key,
+        gtk::gdk::Key::Return | gtk::gdk::Key::KP_Enter | gtk::gdk::Key::Right
+    )
+}
+
+fn activate_recursive_search_result(
+    browser: &Weak<Browser>,
+    results: &RefCell<Vec<crate::services::SearchItem>>,
+    position: u32,
+) -> bool {
+    let Some(item) = results.borrow().get(position as usize).cloned() else {
+        return false;
+    };
+    let Some(browser) = browser.upgrade() else {
+        return false;
+    };
+    if item.is_directory {
+        browser.navigate(Location::local(item.path));
+    } else if let Some(parent) = item.path.parent() {
+        browser.navigate(Location::local(parent));
+    } else {
+        return false;
+    }
+    true
+}
+
+pub(crate) fn search_result_navigation_position(
+    current: Option<u32>,
+    count: u32,
+    direction: i32,
+) -> Option<u32> {
+    if count == 0 {
+        return None;
+    }
+    let Some(current) = current else {
+        return Some(if direction < 0 { count - 1 } else { 0 });
+    };
+    Some((i64::from(current) + i64::from(direction)).clamp(0, i64::from(count - 1)) as u32)
 }
 
 pub(crate) enum SelectionPlan<'a> {

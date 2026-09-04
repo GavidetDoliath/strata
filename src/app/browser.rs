@@ -1079,9 +1079,6 @@ impl Browser {
     pub fn selected_entries(&self) -> Vec<FileEntry> {
         self.state.borrow().selected_entries()
     }
-    pub fn selected_positions(&self, depth: usize) -> Vec<usize> {
-        self.state.borrow().selected_positions(depth)
-    }
 
     pub fn deletion_entries(&self) -> Vec<FileEntry> {
         let state = self.state.borrow();
