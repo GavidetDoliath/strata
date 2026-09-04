@@ -3473,6 +3473,7 @@ menubutton.grid-thumbnail-menu > button:focus-visible {
   color: @theme_text;
   outline: none;
   transition: background 160ms ease-out, color 160ms ease-out;
+  padding: 0;
 }
 
 .explorer-list row:hover {
