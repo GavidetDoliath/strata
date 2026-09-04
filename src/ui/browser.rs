@@ -2903,6 +2903,10 @@ impl ViewState {
             "Close",
         );
         layout.content.add_css_class("properties-content");
+        layout.title.set_max_width_chars(44);
+        layout.title.set_wrap(true);
+        layout.title.set_lines(2);
+        layout.title.set_wrap_mode(gtk::pango::WrapMode::WordChar);
         layout
             .title
             .set_ellipsize(gtk::pango::EllipsizeMode::Middle);
@@ -2968,10 +2972,14 @@ impl ViewState {
         let owner = permission_row(&permissions, "Owner");
         let group = permission_row(&permissions, "Group");
         let others = permission_row(&permissions, "Others");
+        let executable = form_check_button("Allow executing file as a program (+x)");
+        executable.add_css_class("properties-executable");
+        executable.set_sensitive(false);
+        executable.set_visible(!is_directory);
+        permissions.append(&executable);
         layout.body.append(&permissions);
 
-        let actions = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-        actions.add_css_class("properties-actions");
+        layout.actions.add_css_class("properties-actions");
         let open = properties_action(crate::assets::icons::EXTERNAL_LINK, "Open");
         let rename = properties_action(crate::assets::icons::PENCIL, "Rename");
         rename.set_sensitive(entry.is_some());
@@ -2984,15 +2992,65 @@ impl ViewState {
                 && pin_status == PinStatus::Available,
         );
         let copy_path = properties_action(crate::assets::icons::COPY, "Copy path");
-        actions.append(&open);
-        actions.append(&rename);
-        actions.append(&pin);
-        actions.append(&copy_path);
-        layout.actions.prepend(&actions);
+        layout.actions.prepend(&copy_path);
+        layout.actions.prepend(&pin);
+        layout.actions.prepend(&rename);
+        layout.actions.prepend(&open);
         let content = layout.content;
 
         let layer = modal_layer(&content, &window_overlay, blurred_root.clone(), None);
         window_overlay.add_overlay(&layer);
+
+        let permission_editor = PermissionEditor {
+            mode: Rc::new(Cell::new(None)),
+            changing: Rc::new(Cell::new(false)),
+            syncing: Rc::new(Cell::new(false)),
+            mode_label: permissions_mode.clone(),
+            rows: [owner.clone(), group.clone(), others.clone()],
+            executable: executable.clone(),
+        };
+        for (row, masks, subject) in [
+            (&owner, [0o400, 0o200, 0o100], "owner"),
+            (&group, [0o040, 0o020, 0o010], "group"),
+            (&others, [0o004, 0o002, 0o001], "others"),
+        ] {
+            for ((button, mask), permission) in
+                row.bits.iter().zip(masks).zip(["read", "write", "execute"])
+            {
+                button.set_tooltip_text(Some(&format!("Toggle {subject} {permission} permission")));
+                let edited_file = gio_file_for_location(&location);
+                let editor = permission_editor.clone();
+                let parent = layer.clone();
+                button.connect_clicked(move |_| {
+                    let Some(mode) = editor.mode.get() else {
+                        return;
+                    };
+                    request_permission_change(
+                        edited_file.clone(),
+                        toggled_permission(mode, mask),
+                        editor.clone(),
+                        parent.clone().upcast(),
+                    );
+                });
+            }
+        }
+        let executable_file = gio_file_for_location(&location);
+        let executable_editor = permission_editor.clone();
+        let executable_parent = layer.clone();
+        executable.connect_toggled(move |button| {
+            if executable_editor.syncing.get() {
+                return;
+            }
+            let Some(mode) = executable_editor.mode.get() else {
+                return;
+            };
+            request_permission_change(
+                executable_file.clone(),
+                with_execute_permissions(mode, button.is_active()),
+                executable_editor.clone(),
+                executable_parent.clone().upcast(),
+            );
+        });
         let closing_layer = layer.clone();
         let closing_overlay = window_overlay.clone();
         let closing_root = blurred_root.clone();
@@ -3108,13 +3166,16 @@ impl ViewState {
             }
             let mode = info.attribute_uint32("unix::mode");
             if mode != 0 {
-                permissions_mode.set_text(&format_permissions(mode));
-                set_permission_row(&owner, mode, 6);
-                set_permission_row(&group, mode, 3);
-                set_permission_row(&others, mode, 0);
+                permission_editor.mode.set(Some(mode));
+                update_permission_editor(&permission_editor, mode);
+                set_permission_editor_sensitive(&permission_editor, true);
             }
-            owner.0.set_text(info.attribute_string("owner::user").as_deref().unwrap_or("—"));
-            group.0.set_text(info.attribute_string("owner::group").as_deref().unwrap_or("—"));
+            owner
+                .identity
+                .set_text(info.attribute_string("owner::user").as_deref().unwrap_or("—"));
+            group
+                .identity
+                .set_text(info.attribute_string("owner::group").as_deref().unwrap_or("—"));
         });
     }
 
@@ -8230,6 +8291,7 @@ fn properties_row(parent: &gtk::Box, label: &str, value: &str) -> gtk::Label {
     let value = gtk::Label::new(Some(value));
     value.add_css_class("properties-row-value");
     value.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+    value.set_max_width_chars(48);
     value.set_hexpand(true);
     value.set_xalign(0.0);
     row.append(&label);
@@ -8238,7 +8300,21 @@ fn properties_row(parent: &gtk::Box, label: &str, value: &str) -> gtk::Label {
     value
 }
 
-type PermissionRow = (gtk::Label, [gtk::Label; 3]);
+#[derive(Clone)]
+struct PermissionRow {
+    identity: gtk::Label,
+    bits: [gtk::Button; 3],
+}
+
+#[derive(Clone)]
+struct PermissionEditor {
+    mode: Rc<Cell<Option<u32>>>,
+    changing: Rc<Cell<bool>>,
+    syncing: Rc<Cell<bool>>,
+    mode_label: gtk::Label,
+    rows: [PermissionRow; 3],
+    executable: gtk::CheckButton,
+}
 
 fn permission_row(parent: &gtk::Box, label: &str) -> PermissionRow {
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
@@ -8251,12 +8327,12 @@ fn permission_row(parent: &gtk::Box, label: &str) -> PermissionRow {
     identity.set_xalign(0.0);
     let spacer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     spacer.set_hexpand(true);
-    let read = gtk::Label::new(Some("—"));
-    let write = gtk::Label::new(Some("—"));
-    let execute = gtk::Label::new(Some("—"));
+    let read = gtk::Button::with_label("—");
+    let write = gtk::Button::with_label("—");
+    let execute = gtk::Button::with_label("—");
     for permission in [&read, &write, &execute] {
         permission.add_css_class("properties-permission-bit");
-        permission.set_width_chars(2);
+        permission.set_sensitive(false);
     }
     row.append(&title);
     row.append(&identity);
@@ -8265,21 +8341,93 @@ fn permission_row(parent: &gtk::Box, label: &str) -> PermissionRow {
     row.append(&write);
     row.append(&execute);
     parent.append(&row);
-    (identity, [read, write, execute])
+    PermissionRow {
+        identity,
+        bits: [read, write, execute],
+    }
 }
 
 fn set_permission_row(row: &PermissionRow, mode: u32, shift: u32) {
     let value = (mode >> shift) & 0o7;
-    row.1[0].set_text(if value & 0o4 != 0 { "r" } else { "—" });
-    row.1[1].set_text(if value & 0o2 != 0 { "w" } else { "—" });
-    row.1[2].set_text(if value & 0o1 != 0 { "x" } else { "—" });
-    for (index, permission) in row.1.iter().enumerate() {
+    row.bits[0].set_label(if value & 0o4 != 0 { "r" } else { "—" });
+    row.bits[1].set_label(if value & 0o2 != 0 { "w" } else { "—" });
+    row.bits[2].set_label(if value & 0o1 != 0 { "x" } else { "—" });
+    for (index, permission) in row.bits.iter().enumerate() {
         let enabled = value & [0o4, 0o2, 0o1][index] != 0;
         if enabled {
             permission.add_css_class("enabled");
         } else {
             permission.remove_css_class("enabled");
         }
+    }
+}
+
+fn set_permission_editor_sensitive(editor: &PermissionEditor, sensitive: bool) {
+    for row in &editor.rows {
+        for button in &row.bits {
+            button.set_sensitive(sensitive);
+        }
+    }
+    editor.executable.set_sensitive(sensitive);
+}
+
+fn update_permission_editor(editor: &PermissionEditor, mode: u32) {
+    editor.mode_label.set_text(&format_permissions(mode));
+    set_permission_row(&editor.rows[0], mode, 6);
+    set_permission_row(&editor.rows[1], mode, 3);
+    set_permission_row(&editor.rows[2], mode, 0);
+    editor.syncing.set(true);
+    editor.executable.set_active(mode & 0o111 != 0);
+    editor.syncing.set(false);
+}
+
+fn request_permission_change(
+    file: gio::File,
+    requested_mode: u32,
+    editor: PermissionEditor,
+    parent: gtk::Widget,
+) {
+    if editor.changing.replace(true) {
+        return;
+    }
+    let previous_mode = editor.mode.replace(Some(requested_mode));
+    update_permission_editor(&editor, requested_mode);
+    set_permission_editor_sensitive(&editor, false);
+    let attributes = gio::FileInfo::new();
+    attributes.set_attribute_uint32("unix::mode", requested_mode & 0o7777);
+    glib::MainContext::default().spawn_local(async move {
+        match file
+            .set_attributes_future(
+                &attributes,
+                gio::FileQueryInfoFlags::NOFOLLOW_SYMLINKS,
+                glib::Priority::DEFAULT,
+            )
+            .await
+        {
+            Ok(_) => {}
+            Err(error) => {
+                if let Some(mode) = previous_mode {
+                    editor.mode.set(Some(mode));
+                    update_permission_editor(&editor, mode);
+                }
+                tracing::warn!(%error, "unable to change file permissions");
+                show_error_dialog(&parent, "Unable to change permissions", &error.to_string());
+            }
+        }
+        editor.changing.set(false);
+        set_permission_editor_sensitive(&editor, true);
+    });
+}
+
+fn toggled_permission(mode: u32, mask: u32) -> u32 {
+    mode ^ mask
+}
+
+fn with_execute_permissions(mode: u32, executable: bool) -> u32 {
+    if executable {
+        mode | 0o111
+    } else {
+        mode & !0o111
     }
 }
 
