@@ -366,7 +366,7 @@ jobs:
   package:
     name: Prepare AUR package update
     needs: [prepare, release]
-    if: inputs.mode != 'nightly'
+    if: inputs.mode != 'nightly' && vars.AUR_PUBLISH_ENABLED == 'true'
     runs-on: ubuntu-24.04
     container:
       image: archlinux:base-devel
@@ -377,7 +377,9 @@ jobs:
 
     steps:
       - name: Install automation tools
-        run: pacman -Syu --noconfirm --needed github-cli python
+        run: |
+          pacman -Syu --noconfirm --needed github-cli python
+          useradd --create-home builder
 
       - name: Check out the default branch
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -408,7 +410,8 @@ jobs:
             echo "v$VERSION is older than the packaged Preview release."
             exit 0
           fi
-          python3 scripts/update_aur.py "${args[@]}"
+          chown -R builder:builder packaging/aur
+          runuser -u builder -- python3 scripts/update_aur.py "${args[@]}"
 
           if git diff --quiet -- packaging/aur; then
             echo "AUR packages already describe v$VERSION."
