@@ -3,7 +3,7 @@
 use std::{
     cell::{Cell, RefCell},
     collections::HashSet,
-    path::PathBuf,
+    path::{Path, PathBuf},
     rc::{Rc, Weak},
     time::Duration,
 };
@@ -331,6 +331,7 @@ impl Browser {
     }
 
     pub fn navigate_input(self: &Rc<Self>, input: &str) -> Result<(), LocationValidationError> {
+        let input = input.trim();
         if input.is_empty() {
             return Err(LocationValidationError::Empty);
         }
@@ -1889,6 +1890,24 @@ fn deletion_parent_location(location: &Location) -> Option<Location> {
 }
 
 fn location_from_input(input: &str) -> Result<Location, LocationValidationError> {
+    location_from_input_with_home(input, &glib::home_dir())
+}
+
+fn location_from_input_with_home(
+    input: &str,
+    home: &Path,
+) -> Result<Location, LocationValidationError> {
+    if input == "~" {
+        return Ok(Location::local(home));
+    }
+    if let Some(relative) = input.strip_prefix("~/") {
+        return Ok(Location::local(home.join(relative.trim_start_matches('/'))));
+    }
+    if input.starts_with('~') {
+        return Err(LocationValidationError::UnsupportedShorthand(
+            "Only ~ and ~/ paths are supported for the current user's home directory.".to_owned(),
+        ));
+    }
     if !is_uri_like(input) {
         return Ok(Location::local(PathBuf::from(input)));
     }
