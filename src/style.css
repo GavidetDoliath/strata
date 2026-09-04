@@ -2114,15 +2114,59 @@ menubutton.column-header-action > button:active {
   background: transparent;
   border: 1px solid alpha(@theme_border, 0.34);
   border-radius: 4px;
+  box-shadow: none;
   color: @theme_dim_text;
   min-height: 20px;
   min-width: 28px;
+  padding: 0;
+}
+
+.properties-permission-bit:hover {
+  background: alpha(@theme_accent, 0.12);
+  border-color: @theme_accent;
+  color: @theme_text;
+}
+
+.properties-permission-bit:active {
+  background: alpha(@theme_accent, 0.22);
+}
+
+.properties-permission-bit:focus-visible {
+  border-color: @theme_accent;
+  outline: 2px solid alpha(@theme_accent, 0.48);
+  outline-offset: 1px;
 }
 
 .properties-permission-bit.enabled {
   background: alpha(@theme_highlight, 0.48);
   border-color: @theme_accent;
   color: @theme_accent;
+}
+
+.properties-permission-bit:disabled {
+  opacity: 0.58;
+}
+
+.properties-executable {
+  color: @theme_text;
+  margin-top: 4px;
+}
+
+.properties-executable check {
+  background: @theme_surface;
+  border-color: @theme_border;
+  color: @theme_accent;
+}
+
+.properties-executable:hover check,
+.properties-executable:focus-visible check {
+  border-color: @theme_accent;
+}
+
+.properties-executable:checked check {
+  background: @theme_accent;
+  border-color: @theme_accent;
+  color: @theme_surface;
 }
 
 .properties-actions {
