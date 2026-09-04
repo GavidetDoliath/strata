@@ -2,7 +2,7 @@
 
 use std::{
     cell::{Cell, RefCell},
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     ffi::OsString,
     future::Future,
     path::Path,
@@ -636,6 +636,15 @@ impl BrowserView {
             BrowserDensity::Compact => "density-compact",
             BrowserDensity::Airy => "density-airy",
         });
+    }
+
+    /// Groups Explorer and Grid entries under file-type headings. The Miller-column
+    /// mode is unaffected.
+    pub fn set_group_by_type(&self, enabled: bool) {
+        self.state
+            .mode_views
+            .borrow_mut()
+            .set_group_by_type(enabled);
     }
 
     pub fn activate_focused(&self) {
@@ -4680,17 +4689,19 @@ impl ViewState {
             view: list.clone().upcast(),
             scroll: scroll.clone(),
             overlay: self.overlay.clone(),
-            selection: selection.clone(),
-            visit_items: Rc::new(move |visit| {
-                rows_for_marquee.borrow_mut().retain(|bound| {
-                    let (Some(item), Some(row)) = (bound.item.upgrade(), bound.row.upgrade())
-                    else {
-                        return false;
-                    };
-                    visit(item.position(), row.upcast_ref());
-                    true
-                });
-            }),
+            targets: Rc::new(RefCell::new(vec![super::marquee::MarqueeTarget {
+                selection: selection.clone(),
+                visit_items: Rc::new(move |visit| {
+                    rows_for_marquee.borrow_mut().retain(|bound| {
+                        let (Some(item), Some(row)) = (bound.item.upgrade(), bound.row.upgrade())
+                        else {
+                            return false;
+                        };
+                        visit(item.position(), row.upcast_ref());
+                        true
+                    });
+                }),
+            }])),
             is_item: Rc::new(|widget| is_file_row_target(widget.clone())),
         });
         marquee.add_origin_surface(&header);
@@ -4738,7 +4749,10 @@ impl ViewState {
         install_folder_context_menu(
             self,
             presentation.stack.upcast_ref(),
-            &selection,
+            {
+                let entries = selection.clone();
+                Rc::new(move || entries.n_items() > 0)
+            },
             Rc::new(|picked| is_file_row_target(picked.clone())),
             depth,
             location.clone(),
@@ -4763,6 +4777,7 @@ impl ViewState {
             &selection,
             pick_position,
             source_position,
+            Rc::new(|| {}),
             depth,
         );
         column.append(&new_entry_row);
@@ -5285,7 +5300,7 @@ fn filtered_position_for_source(column: &ColumnView, source_position: usize) -> 
 pub(super) fn install_folder_context_menu(
     state: &Rc<ViewState>,
     parent: &gtk::Widget,
-    selection: &gtk::MultiSelection,
+    has_entries: Rc<dyn Fn() -> bool>,
     is_item_target: Rc<dyn Fn(&gtk::Widget) -> bool>,
     depth: usize,
     location: Location,
@@ -5409,7 +5424,6 @@ pub(super) fn install_folder_context_menu(
 
     let menu_click = gtk::GestureClick::new();
     menu_click.set_button(3);
-    let selection = selection.clone();
     let popover_for_click = popover.clone();
     menu_click.connect_pressed(move |gesture, _, x, y| {
         let over_item = gesture
@@ -5426,7 +5440,7 @@ pub(super) fn install_folder_context_menu(
                 .formats()
                 .contains_type(gtk::gdk::FileList::static_type())
         }));
-        select_all.set_sensitive(selection.n_items() > 0);
+        select_all.set_sensitive(has_entries());
         open_terminal.set_sensitive(can_open_terminal(&location));
         if popover_for_click.parent().is_none()
             && let Some(parent) = gesture.widget()
@@ -5455,6 +5469,7 @@ pub(super) fn install_item_context_menu(
     selection: &gtk::MultiSelection,
     pick_position: ContextPickPosition,
     source_position: ContextSourcePosition,
+    clear_other_selections: Rc<dyn Fn()>,
     depth: usize,
 ) {
     let in_trash = state
@@ -5755,6 +5770,7 @@ pub(super) fn install_item_context_menu(
         };
         gesture.set_state(gtk::EventSequenceState::Claimed);
         if !selection.is_selected(filtered_position) {
+            clear_other_selections();
             selection.select_item(filtered_position, true);
         }
         target.replace(Some((resolved_position, entry.clone())));
@@ -7132,6 +7148,68 @@ fn model_is_directory(value: &str) -> bool {
 
 pub(super) fn model_is_hidden(value: &str) -> bool {
     value.as_bytes().get(1) == Some(&b'h')
+}
+
+fn model_is_broken_link(value: &str) -> bool {
+    value.starts_with("x")
+}
+
+/// Directories lead a grouped view, and files whose type the shared MIME database
+/// cannot name fall back to a plain label.
+pub(super) const FOLDER_TYPE_GROUP: &str = "Folder";
+const UNTYPED_TYPE_GROUP: &str = "File";
+
+/// The user-facing file-type label a model value belongs to when the browser groups
+/// entries by type. Labels come from the shared MIME database, so they read the way
+/// they do elsewhere on the desktop: "JSON document", "Python script", and so on.
+pub(super) fn model_type_group(value: &str) -> String {
+    if model_is_directory(value) {
+        return FOLDER_TYPE_GROUP.to_owned();
+    }
+    if model_is_broken_link(value) {
+        return "Broken link".to_owned();
+    }
+    let name = model_display_name(value);
+    TYPE_GROUPS.with_borrow_mut(|cache| {
+        if let Some(label) = cache.get(type_group_key(name)) {
+            return label.clone();
+        }
+        let label = guess_type_group(name);
+        // A directory listing holds far more entries than distinct types, and the
+        // cache is keyed by suffix, so it stays small; clear it if that ever fails.
+        if cache.len() >= TYPE_GROUP_CACHE_LIMIT {
+            cache.clear();
+        }
+        cache.insert(type_group_key(name).to_owned(), label.clone());
+        label
+    })
+}
+
+/// Names sharing a suffix share a type, so the cache is keyed by suffix where there
+/// is one and by the whole name otherwise.
+fn type_group_key(name: &str) -> &str {
+    match name.rfind('.') {
+        Some(position) if position > 0 => &name[position..],
+        _ => name,
+    }
+}
+
+fn guess_type_group(name: &str) -> String {
+    let (content_type, _) = gio::content_type_guess(Some(Path::new(name)), None::<&[u8]>);
+    if content_type.is_empty() || content_type == "application/octet-stream" {
+        return UNTYPED_TYPE_GROUP.to_owned();
+    }
+    let description = gio::content_type_get_description(&content_type);
+    if description.is_empty() {
+        return UNTYPED_TYPE_GROUP.to_owned();
+    }
+    description.to_string()
+}
+
+const TYPE_GROUP_CACHE_LIMIT: usize = 2048;
+
+thread_local! {
+    static TYPE_GROUPS: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
 }
 
 pub(super) fn entry_filter(
