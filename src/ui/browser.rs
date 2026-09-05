@@ -3382,7 +3382,11 @@ impl ViewState {
         let Some(middle) = icon.next_sibling().and_downcast::<gtk::Overlay>() else {
             return false;
         };
-        let Some(editor) = middle.child().and_downcast::<gtk::Box>() else {
+        let Some(editor) = middle
+            .child()
+            .and_then(|content| content.first_child())
+            .and_downcast::<gtk::Box>()
+        else {
             return false;
         };
         let Some(label) = editor.first_child().and_downcast::<gtk::Label>() else {
@@ -4714,8 +4718,8 @@ impl ViewState {
         let weak_filter_entry = filter_entry.downgrade();
         debounce_filter_entry(&filter_entry, move |text| {
             let query = text.trim().to_string();
-            search_gen_for_changed.set(search_gen_for_changed.get().saturating_add(1));
             if query.is_empty() {
+                search_gen_for_changed.set(search_gen_for_changed.get().saturating_add(1));
                 search_handle_for_changed.borrow_mut().take();
                 search_results_for_changed.borrow_mut().clear();
                 search_model_for_changed.splice(0, search_model_for_changed.n_items(), &[]);
@@ -4859,7 +4863,19 @@ impl ViewState {
             size.set_xalign(1.0);
             let middle = gtk::Overlay::new();
             middle.set_hexpand(true);
-            middle.set_child(Some(&editor));
+            let path = gtk::Label::builder()
+                .xalign(0.0)
+                .wrap(true)
+                .wrap_mode(gtk::pango::WrapMode::WordChar)
+                .lines(2)
+                .ellipsize(gtk::pango::EllipsizeMode::Middle)
+                .visible(false)
+                .build();
+            path.add_css_class("file-search-path");
+            let content = gtk::Box::new(gtk::Orientation::Vertical, 2);
+            content.append(&editor);
+            content.append(&path);
+            middle.set_child(Some(&content));
             middle.add_overlay(&size);
             let chevron = crate::assets::primary_icon(crate::assets::icons::CHEVRON_RIGHT, 15);
             chevron.add_css_class("file-chevron");
@@ -5129,7 +5145,13 @@ impl ViewState {
             let Some(middle) = icon.next_sibling().and_downcast::<gtk::Overlay>() else {
                 return;
             };
-            let Some(editor) = middle.child().and_downcast::<gtk::Box>() else {
+            let Some(content) = middle.child().and_downcast::<gtk::Box>() else {
+                return;
+            };
+            let Some(editor) = content.first_child().and_downcast::<gtk::Box>() else {
+                return;
+            };
+            let Some(path) = content.last_child().and_downcast::<gtk::Label>() else {
                 return;
             };
             let Some(label) = editor.first_child().and_downcast::<gtk::Label>() else {
@@ -5178,6 +5200,13 @@ impl ViewState {
             } else {
                 source_position.and_then(|position| browser?.entry_at(depth, position))
             };
+            let origin = entry
+                .as_ref()
+                .filter(|_| searching)
+                .map(|entry| entry.location.display_path());
+            path.set_label(origin.as_deref().unwrap_or_default());
+            path.set_visible(origin.is_some());
+            row.set_tooltip_text(origin.as_deref());
             let active = entry.as_ref().is_some_and(|entry| {
                 browser
                     .as_ref()
