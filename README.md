@@ -64,8 +64,8 @@ Arch Linux and Omarchy are the primary supported environments. Current binaries 
 
 The interactive installer detects the Linux architecture, glibc version, Arch
 Linux, and Omarchy 3 or 4. It installs the latest verified stable release and
-offers optional desktop-menu, default-folder-handler, SMB, broader image/RAW,
-and Omarchy keybind integration:
+offers optional desktop-menu, default-folder-handler, "Open file location", SMB,
+broader image/RAW, and Omarchy keybind integration:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/lgse/strata/main/install.sh | bash
@@ -91,8 +91,9 @@ curl -fsSL https://raw.githubusercontent.com/lgse/strata/main/install.sh \
 ```
 
 Each `--with-*` flag implies `--non-interactive`, and folder association implies
-the desktop entry. Non-interactive package installation requires passwordless
-sudo or cached credentials. Run `./install.sh --help` for the full option list.
+the desktop entry and `--with-file-manager`. Use `--with-file-manager` by itself
+to enable only "Open file location" integration. Non-interactive package
+installation requires passwordless sudo or cached credentials. Run `./install.sh --help` for the full option list.
 
 ### AI-assisted installation
 
@@ -124,6 +125,10 @@ Then:
   if yes, install the archive's io.github.lgse.Strata.desktop and io.github.lgse.Strata.svg
   under ~/.local/share, pointing Exec at the installed binary, then refresh the
   desktop database and icon cache.
+- Separately ask whether Strata should handle "Open file location" requests. If
+  yes, verify no other per-user service provides org.freedesktop.FileManager1,
+  then install the archive's io.github.lgse.Strata.FileManager1.service under
+  ~/.local/share/dbus-1/services with Exec pointing at the installed binary.
 - Launch `strata`, report its installed version/source release, and verify the
   desktop association if one was requested. Do not weaken the preview sandbox.
 ```
@@ -188,6 +193,7 @@ For a manual installation, use **Settings → Updates** for verified in-app upda
 ```bash
 rm -f ~/.local/bin/strata \
   ~/.local/share/applications/io.github.lgse.Strata.desktop \
+  ~/.local/share/dbus-1/services/io.github.lgse.Strata.FileManager1.service \
   ~/.local/share/icons/hicolor/scalable/apps/io.github.lgse.Strata.svg
 update-desktop-database ~/.local/share/applications 2>/dev/null || true
 gtk-update-icon-cache -qtf ~/.local/share/icons/hicolor 2>/dev/null || true
@@ -226,6 +232,42 @@ xdg-mime query default inode/directory
 The final command should print `io.github.lgse.Strata.desktop`. The desktop entry's filename matches the `io.github.lgse.Strata` application ID that Strata's windows report, so desktop shells match a running window to this entry and draw its `Icon` value. Log out and back in if a shell caches launcher icons.
 
 When building from source, `make install-local` installs the binary, icon, and desktop entry in the same locations, and `make uninstall-local` removes them.
+
+### "Open file location" from other applications
+
+Browsers and GTK/GNOME applications reveal a file by calling the `org.freedesktop.FileManager1` D-Bus interface instead of consulting the `inode/directory` association. The interactive installer offers this separately; for unattended installation, pass `--with-file-manager`. Folder association enables it automatically.
+
+For a source installation, enable Strata as the per-user activatable provider explicitly:
+
+```bash
+make install-file-manager
+```
+
+For an AUR package, copy its inactive service template into your per-user service directory:
+
+```bash
+install -Dm644 /usr/share/strata/io.github.lgse.Strata.FileManager1.service \
+  ~/.local/share/dbus-1/services/io.github.lgse.Strata.FileManager1.service
+```
+
+For a release archive installation, install the included service manually instead:
+
+```bash
+cd ~/Downloads/"${archive%.tar.gz}"
+install -d ~/.local/share/dbus-1/services
+sed "s|^Exec=/usr/bin/strata |Exec=$HOME/.local/bin/strata |" \
+  io.github.lgse.Strata.FileManager1.service \
+  > ~/.local/share/dbus-1/services/io.github.lgse.Strata.FileManager1.service
+```
+
+A per-user provider takes precedence over system providers shipped by other file managers. Before enabling Strata manually, remove any other per-user service whose `Name` is `org.freedesktop.FileManager1`; two providers for the same name in one service directory are chosen arbitrarily. If another file manager already owns the bus name, exit it before testing. Use `make uninstall-file-manager` for a source installation, or remove the per-user service file, to disable Strata again.
+
+Strata then answers `ShowFolders`, `ShowItems`, and `ShowItemProperties`, opening the directory that holds the named items with those items selected:
+
+```bash
+busctl --user call org.freedesktop.FileManager1 /org/freedesktop/FileManager1 \
+  org.freedesktop.FileManager1 ShowItems ass 1 "file://$HOME/Downloads" ""
+```
 
 ### Make Strata the Omarchy file manager
 
