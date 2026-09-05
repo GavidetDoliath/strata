@@ -6321,6 +6321,83 @@ fn bitset_positions(bitset: &gtk::Bitset) -> Vec<u32> {
     std::iter::once(first).chain(iterator).collect()
 }
 
+const CONTEXT_MENU_EDGE_MARGIN: i32 = 24;
+
+fn context_menu_placement(anchor_height: i32, click_y: f64) -> (gtk::PositionType, i32) {
+    let click_y = click_y.round() as i32;
+    let above = click_y.clamp(0, anchor_height);
+    let below = anchor_height.saturating_sub(above);
+    let (position, available_height) = if below >= above {
+        (gtk::PositionType::Bottom, below)
+    } else {
+        (gtk::PositionType::Top, above)
+    };
+
+    (
+        position,
+        available_height
+            .saturating_sub(CONTEXT_MENU_EDGE_MARGIN)
+            .max(1),
+    )
+}
+
+fn context_menu_popover(content: &impl IsA<gtk::Widget>) -> (gtk::Popover, gtk::ScrolledWindow) {
+    let scroll = gtk::ScrolledWindow::builder()
+        .child(content)
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .vscrollbar_policy(gtk::PolicyType::Automatic)
+        .propagate_natural_height(true)
+        .build();
+    scroll.add_css_class("context-menu-scroll");
+
+    (
+        gtk::Popover::builder()
+            .child(&scroll)
+            .autohide(true)
+            .has_arrow(false)
+            .build(),
+        scroll,
+    )
+}
+
+fn context_popover_overlay(anchor: &gtk::Widget) -> Option<gtk::Overlay> {
+    anchor
+        .root()
+        .and_downcast::<gtk::Window>()
+        .and_then(|window| window.child())
+        .and_downcast::<gtk::Overlay>()
+}
+
+fn show_context_popover(
+    popover: &gtk::Popover,
+    scroll: &gtk::ScrolledWindow,
+    anchor: &gtk::Widget,
+    x: f64,
+    y: f64,
+) {
+    let Some(overlay) = context_popover_overlay(anchor) else {
+        return;
+    };
+    if popover.parent().is_none() {
+        overlay.add_overlay(popover);
+    }
+    let point = anchor
+        .compute_point(&overlay, &gtk::graphene::Point::new(x as f32, y as f32))
+        .unwrap_or(gtk::graphene::Point::new(x as f32, y as f32));
+    let (position, max_content_height) =
+        context_menu_placement(overlay.height(), f64::from(point.y()));
+    popover.set_position(position);
+    scroll.set_max_content_height(max_content_height);
+    popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(
+        point.x().round() as i32,
+        point.y().round() as i32,
+        1,
+        1,
+    )));
+    popover.popup();
+    popover.present();
+}
+
 pub(super) fn install_folder_context_menu(
     state: &Rc<ViewState>,
     parent: &gtk::Widget,
@@ -6331,11 +6408,7 @@ pub(super) fn install_folder_context_menu(
 ) {
     let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
     content.add_css_class("folder-context-menu");
-    let popover = gtk::Popover::builder()
-        .child(&content)
-        .autohide(true)
-        .has_arrow(false)
-        .build();
+    let (popover, scroll) = context_menu_popover(&content);
     popover.add_css_class("folder-context-popover");
 
     let new_folder = context_menu_option(
@@ -6475,6 +6548,7 @@ pub(super) fn install_folder_context_menu(
     menu_click.set_button(3);
     let popover_for_click = popover.clone();
     let browser_for_click = state.browser.clone();
+    let scroll_for_click = scroll.clone();
     menu_click.connect_pressed(move |gesture, _, x, y| {
         let over_item = gesture
             .widget()
@@ -6506,18 +6580,9 @@ pub(super) fn install_folder_context_menu(
                 crate::assets::icons::EYE_OFF
             },
         );
-        if popover_for_click.parent().is_none()
-            && let Some(parent) = gesture.widget()
-        {
-            popover_for_click.set_parent(&parent);
+        if let Some(anchor) = gesture.widget() {
+            show_context_popover(&popover_for_click, &scroll_for_click, &anchor, x, y);
         }
-        popover_for_click.set_pointing_to(Some(&gtk::gdk::Rectangle::new(
-            x.round() as i32,
-            y.round() as i32,
-            1,
-            1,
-        )));
-        popover_for_click.popup();
     });
     parent.add_controller(menu_click);
 }
@@ -6663,13 +6728,9 @@ pub(super) fn install_item_context_menu(
     multiple.set_visible(false);
     content.append(&multiple);
 
-    let popover = gtk::Popover::builder()
-        .child(&content)
-        .autohide(true)
-        .has_arrow(false)
-        .build();
+    let (popover, scroll) = context_menu_popover(&content);
     popover.add_css_class("folder-context-popover");
-    popover.set_parent(widget);
+    popover.connect_closed(|popover| popover.unparent());
 
     let target = Rc::new(RefCell::new(None::<(usize, FileEntry)>));
     let weak = Rc::downgrade(state);
@@ -6856,7 +6917,8 @@ pub(super) fn install_item_context_menu(
     let click = gtk::GestureClick::new();
     click.set_button(3);
     let weak_state = Rc::downgrade(state);
-    let weak_popover = popover.downgrade();
+    let popover_for_reveal = popover.clone();
+    let scroll_for_reveal = scroll.clone();
     let selection = selection.clone();
     click.connect_pressed(move |gesture, _, x, y| {
         let Some(picked) = gesture
@@ -6915,16 +6977,10 @@ pub(super) fn install_item_context_menu(
             single.set_visible(true);
             multiple.set_visible(false);
         }
-        let Some(popover) = weak_popover.upgrade() else {
+        let Some(anchor) = gesture.widget() else {
             return;
         };
-        popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(
-            x.round() as i32,
-            y.round() as i32,
-            1,
-            1,
-        )));
-        popover.popup();
+        show_context_popover(&popover_for_reveal, &scroll_for_reveal, &anchor, x, y);
     });
     widget.add_controller(click);
 }

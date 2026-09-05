@@ -571,6 +571,26 @@ fn multi_selection_summary_lists_at_most_three_names() {
 }
 
 #[test]
+fn context_menu_uses_the_roomier_side_of_the_click() {
+    assert_eq!(
+        context_menu_placement(800, 120.0),
+        (gtk::PositionType::Bottom, 656)
+    );
+    assert_eq!(
+        context_menu_placement(800, 680.0),
+        (gtk::PositionType::Top, 656)
+    );
+}
+
+#[test]
+fn context_menu_keeps_a_positive_scrollable_height_in_a_small_view() {
+    assert_eq!(
+        context_menu_placement(20, 10.0),
+        (gtk::PositionType::Bottom, 1)
+    );
+}
+
+#[test]
 fn trash_locations_include_the_root_and_descendants() {
     assert!(is_trash_location(&Location::uri("trash:///")));
     assert!(is_trash_location(&Location::uri("trash:///folder")));
