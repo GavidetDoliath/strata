@@ -6254,7 +6254,7 @@ pub(crate) fn recursive_search_activation_key(key: gtk::gdk::Key) -> bool {
     )
 }
 
-fn activate_recursive_search_result(
+pub(crate) fn activate_recursive_search_result(
     browser: &Weak<Browser>,
     results: &RefCell<Vec<crate::services::SearchItem>>,
     position: u32,
