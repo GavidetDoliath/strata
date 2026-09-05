@@ -250,10 +250,6 @@ impl SearchDialog {
     }
 
     pub fn show(&self, root: PathBuf) {
-        self.show_with_query(root, "");
-    }
-
-    pub fn show_with_query(&self, root: PathBuf, query: &str) {
         self.state.generation.set(self.state.generation.get() + 1);
         let generation = self.state.generation.get();
         self.state.search.borrow_mut().take();
@@ -271,8 +267,6 @@ impl SearchDialog {
 
         let (handle, receiver) = index_tree(root);
         self.state.search.replace(Some(handle));
-        self.state.field.set_text(query);
-        self.state.field.set_position(-1);
         let weak = Rc::downgrade(&self.state);
         let _poll = glib::timeout_add_local(Duration::from_millis(16), move || {
             let Some(state) = weak.upgrade() else {
@@ -375,13 +369,12 @@ fn result_row(item: &SearchItem, root: &Path) -> gtk::ListBoxRow {
     let content = gtk::Box::new(gtk::Orientation::Horizontal, 12);
     let icon = gtk::Image::new();
     icon.add_css_class("search-result-thumbnail");
-    if item.is_directory {
-        crate::assets::set_primary_icon(&icon, crate::assets::icons::FOLDER);
-        icon.set_pixel_size(19);
-        icon.set_size_request(32, 32);
+    let fallback = if item.is_directory {
+        crate::assets::icons::FOLDER
     } else {
-        super::thumbnail::show_fallback_icon(&icon, crate::assets::icons::DOCUMENTS, 19);
-    }
+        crate::assets::icons::DOCUMENTS
+    };
+    super::thumbnail::show_customized_icon(&icon, &item.path, fallback, 19);
     content.append(&icon);
     let labels = gtk::Box::new(gtk::Orientation::Vertical, 2);
     labels.set_hexpand(true);
@@ -410,9 +403,6 @@ fn refresh_visible_thumbnails(state: &SearchState) {
         let mut requested = state.requested_thumbnails.borrow_mut();
         let mut changes = Vec::new();
         for (position, item) in items.iter().enumerate() {
-            if item.is_directory {
-                continue;
-            }
             let Some(row) = i32::try_from(position)
                 .ok()
                 .and_then(|position| state.list.row_at_index(position))
@@ -436,24 +426,23 @@ fn refresh_visible_thumbnails(state: &SearchState) {
                 continue;
             };
             if visible && requested.insert(position) {
-                changes.push((image, Some(item.path.clone())));
+                changes.push((image, Some(item.path.clone()), item.is_directory));
             } else if !visible && requested.remove(&position) {
-                changes.push((image, None));
+                changes.push((image, None, item.is_directory));
             }
         }
         changes
     };
-    for (image, path) in changes {
-        if let Some(path) = path {
-            super::thumbnail::set_thumbnail_or_icon_for_path(
-                &image,
-                &path,
-                crate::assets::icons::DOCUMENTS,
-                19,
-                32,
-            );
+    for (image, path, is_directory) in changes {
+        let fallback = if is_directory {
+            crate::assets::icons::FOLDER
         } else {
-            super::thumbnail::show_fallback_icon(&image, crate::assets::icons::DOCUMENTS, 19);
+            crate::assets::icons::DOCUMENTS
+        };
+        if let Some(path) = path {
+            super::thumbnail::set_thumbnail_or_icon_for_path(&image, &path, fallback, 19, 32);
+        } else {
+            super::thumbnail::show_fallback_icon(&image, fallback, 19);
         }
     }
 }

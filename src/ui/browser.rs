@@ -5,19 +5,21 @@ use std::{
     collections::{HashMap, HashSet},
     ffi::OsString,
     future::Future,
-    path::Path,
+    path::{Path, PathBuf},
     pin::Pin,
     process::{Command, Stdio},
     rc::{Rc, Weak},
     time::{Duration, Instant},
 };
 
-use gtk::{gio, glib, prelude::*};
+use gtk::{gdk, gio, glib, prelude::*};
 
 use crate::{
     adapters::location_for_file,
     app::{Browser, BrowserEvent},
-    model::{EntryKind, FileEntry, Location, SortDirection, SortKey},
+    model::{
+        EntryKind, FileEntry, FolderColor, FolderColorValue, Location, SortDirection, SortKey,
+    },
     services::{
         ArchiveFormat, FileSource, LoadHandle, LocationValidationError, MoveRecord,
         OperationProvider, PasteItem, PreviewContent, SearchEvent, TransferConflict, UndoMoveItem,
@@ -321,6 +323,9 @@ pub(super) struct ViewState {
     pin_status_handler: RefCell<Option<PinStatusHandler>>,
     print_handler: RefCell<Option<PrintHandler>>,
     pending_select: RefCell<Vec<String>>,
+    /// Set when the pending selection came from a properties request, so the
+    /// dialog opens once the entry it describes is actually loaded.
+    pending_select_properties: Cell<bool>,
     pending_extract_retry: RefCell<Option<(FileEntry, Location)>>,
     /// The entries a just-dispatched, non-permanent delete requested,
     /// snapshotted so a `CompletedWithErrors` response naming entries that
@@ -480,6 +485,7 @@ impl BrowserView {
             pin_status_handler: RefCell::new(None),
             print_handler: RefCell::new(None),
             pending_select: RefCell::new(Vec::new()),
+            pending_select_properties: Cell::new(false),
             pending_extract_retry: RefCell::new(None),
             pending_delete_entries: RefCell::new(Vec::new()),
             pending_navigate: RefCell::new(None),
@@ -565,10 +571,15 @@ impl BrowserView {
         self.state.overlay.clone().upcast()
     }
 
-    pub fn navigate(&self, path: impl AsRef<Path>) {
-        self.state
-            .browser
-            .navigate(Location::local(path.as_ref().to_path_buf()));
+    pub fn navigate_location(&self, location: Location) {
+        self.state.browser.navigate(location);
+    }
+
+    /// Selects `names` in the active column once it finishes loading,
+    /// optionally opening the properties dialog for the focused one.
+    pub fn select_after_load(&self, names: Vec<String>, properties: bool) {
+        self.state.pending_select.borrow_mut().extend(names);
+        self.state.pending_select_properties.set(properties);
     }
 
     pub fn browser(&self) -> Rc<Browser> {
@@ -650,11 +661,13 @@ impl BrowserView {
         if mode == previous {
             return;
         }
+        self.state.mode_views.borrow().show_mode(mode);
         self.state.mode_views.borrow_mut().prepare_mode(mode);
         if mode == BrowserMode::Columns {
             self.state.rebuild_columns();
+        } else if let Some(depth) = self.state.browser.active_depth() {
+            self.state.mode_views.borrow().focus_visible_pane(depth);
         }
-        self.state.mode_views.borrow().show_mode(mode);
         match previous {
             BrowserMode::Columns => self.state.truncate(0),
             BrowserMode::Grid | BrowserMode::Explorer => self
@@ -1062,8 +1075,16 @@ impl BrowserView {
     }
 
     pub fn show_filter(&self) -> bool {
+        self.show_filter_with_optional_query(None)
+    }
+
+    pub fn show_filter_with_query(&self, query: &str) -> bool {
+        self.show_filter_with_optional_query(Some(query))
+    }
+
+    fn show_filter_with_optional_query(&self, query: Option<&str>) -> bool {
         if self.view_mode() != BrowserMode::Columns {
-            return self.state.mode_views.borrow().show_filter();
+            return self.state.mode_views.borrow().show_filter_with_query(query);
         }
         let depth = self
             .state
@@ -1074,6 +1095,10 @@ impl BrowserView {
             return false;
         };
         column.filter_button.set_active(true);
+        if let Some(query) = query {
+            column.filter_entry.set_text(query);
+            column.filter_entry.set_position(-1);
+        }
         column.filter_entry.grab_focus();
         true
     }
@@ -1099,6 +1124,22 @@ impl BrowserView {
                         || focused.is_ancestor(&column.list)
                 })
             })
+    }
+
+    /// Moves the focus by about one viewport of the focused view, so `Page Up` and
+    /// `Page Down` act on the active pane or column only.
+    pub fn page_selection(&self, direction: i32) -> bool {
+        let focused = self.state.overlay.root().and_then(|root| root.focus());
+        let Some((view, scroll)) = focused
+            .as_ref()
+            .and_then(super::scrolling::focused_collection)
+        else {
+            return false;
+        };
+        let page = super::scrolling::page(&view, &scroll);
+        self.state.browser.page_selection(direction, page.items);
+        super::scrolling::reveal_selection(&view, &scroll, direction, &page);
+        true
     }
 
     pub fn dismiss_empty_focused_filter(&self) -> bool {
@@ -1172,7 +1213,6 @@ impl ViewState {
             return;
         }
         let weak_state = Rc::downgrade(self);
-        let weak_browser = Rc::downgrade(&self.browser);
         let source = glib::timeout_add_local(Duration::from_secs(u64::from(secs)), move || {
             let Some(state) = weak_state.upgrade() else {
                 return glib::ControlFlow::Break;
@@ -1184,17 +1224,18 @@ impl ViewState {
             {
                 return glib::ControlFlow::Continue;
             }
-            let Some(browser) = weak_browser.upgrade() else {
-                return glib::ControlFlow::Break;
-            };
-            if state.mode_views.borrow().mode() == BrowserMode::Columns {
-                browser.refresh_all();
-            } else {
-                browser.reload_active();
-            }
+            state.refresh_browser();
             glib::ControlFlow::Continue
         });
         self.auto_refresh.replace(Some(source));
+    }
+
+    fn refresh_browser(&self) {
+        if self.mode_views.borrow().mode() == BrowserMode::Columns {
+            self.browser.refresh_all();
+        } else {
+            self.browser.reload_active();
+        }
     }
 
     fn sync_mode_selection(&self) {
@@ -3032,6 +3073,9 @@ impl ViewState {
             if is_directory { "Folder" } else { "File" },
             "Close",
         );
+        if let Some(path) = location.native_path() {
+            super::thumbnail::show_customized_icon(&layout.icon, path, icon_name, 21);
+        }
         layout.content.add_css_class("properties-content");
         layout.title.set_max_width_chars(44);
         layout.title.set_wrap(true);
@@ -4077,11 +4121,15 @@ impl ViewState {
                 }
                 if self.browser.active_depth() == Some(*depth) {
                     let names = self.pending_select.take();
+                    let properties = self.pending_select_properties.replace(false);
                     if !names.is_empty() {
                         let weak = Rc::downgrade(self);
                         glib::idle_add_local_once(move || {
                             if let Some(state) = weak.upgrade() {
                                 state.browser.select_entries_by_name(&names);
+                                if properties && let Some(entry) = state.browser.focused_entry() {
+                                    state.show_entry_properties(entry);
+                                }
                             }
                         });
                     }
@@ -4150,9 +4198,7 @@ impl ViewState {
                         && self.active_new_entry.borrow().is_none()
                     {
                         if let Some(focused) = column.map.view_position(*focused) {
-                            column
-                                .list
-                                .scroll_to(focused, gtk::ListScrollFlags::FOCUS, None);
+                            scroll_column_to(column, focused);
                         }
                         if *take_focus && self.mode_views.borrow().mode() == BrowserMode::Columns {
                             column.list.grab_focus();
@@ -4169,11 +4215,7 @@ impl ViewState {
                     {
                         set_column_selection(column, filtered_position);
                         if !editing {
-                            column.list.scroll_to(
-                                filtered_position,
-                                gtk::ListScrollFlags::FOCUS,
-                                None,
-                            );
+                            scroll_column_to(column, filtered_position);
                         }
                     }
                     if !editing && self.mode_views.borrow().mode() == BrowserMode::Columns {
@@ -4431,15 +4473,24 @@ impl ViewState {
         let Some(column) = columns.get(depth) else {
             return;
         };
-        if let Some((focused_depth, position, _)) = self.browser.focused_item()
-            && focused_depth == depth
-            && let Some(position) = column.map.view_position(position)
-        {
-            column
-                .list
-                .scroll_to(position, gtk::ListScrollFlags::FOCUS, None);
+        let position = self
+            .browser
+            .focused_item()
+            .and_then(|(focused_depth, position, _)| {
+                (focused_depth == depth)
+                    .then(|| column.map.view_position(position))
+                    .flatten()
+            });
+        if let Some(position) = position {
+            scroll_column_to(column, position);
         }
         column.list.grab_focus();
+        let list = column.list.downgrade();
+        glib::idle_add_local_once(move || {
+            if let Some(list) = list.upgrade() {
+                list.grab_focus();
+            }
+        });
     }
 
     fn event_refreshes_active_path(event: &BrowserEvent) -> bool {
@@ -4820,18 +4871,22 @@ impl ViewState {
             row.append(&middle);
             row.append(&chevron);
             let motion = gtk::EventControllerMotion::new();
-            let list_item = item.clone();
-            let anchor: gtk::Widget = row.clone().upcast();
+            let list_item = item.downgrade();
             let weak_state_for_enter = weak_state.clone();
             let map_for_enter = map_for_hover.clone();
-            motion.connect_enter(move |_, _, _| {
+            motion.connect_enter(move |controller, _, _| {
+                let Some(item) = list_item.upgrade() else {
+                    return;
+                };
                 if let Some(state) = weak_state_for_enter.upgrade() {
-                    let source_position = map_for_enter.source_position(list_item.position());
+                    let source_position = map_for_enter.source_position(item.position());
                     let entry = source_position
                         .and_then(|position| state.browser.entry_at(depth, position));
                     if let Some(entry) = entry {
                         if entry.is_directory() {
-                            state.schedule_peek(depth, entry.location, anchor.clone());
+                            if let Some(anchor) = controller.widget() {
+                                state.schedule_peek(depth, entry.location, anchor);
+                            }
                         } else {
                             cancel_source(&state.pending_peek);
                             state.browser.close_peek();
@@ -4851,12 +4906,14 @@ impl ViewState {
                 .actions(gtk::gdk::DragAction::COPY | gtk::gdk::DragAction::MOVE)
                 .build();
             let weak_state_for_drag = weak_state.clone();
-            let dragged_item = item.clone();
+            let dragged_item = item.downgrade();
             let map_for_drag = map_for_hover.clone();
-            let prepare_row = row.clone();
+            let prepare_row = row.downgrade();
             drag.connect_prepare(move |source, x, y| {
+                let prepare_row = prepare_row.upgrade()?;
                 prepare_row.remove_css_class("slide-out");
                 let state = weak_state_for_drag.upgrade()?;
+                let dragged_item = dragged_item.upgrade()?;
                 let source_position = map_for_drag.source_position(dragged_item.position())?;
                 let entry = state.browser.entry_at(depth, source_position)?;
                 let selected = state.browser.selected_entries();
@@ -4872,12 +4929,18 @@ impl ViewState {
                 source.set_icon(Some(&paintable), x.round() as i32, y.round() as i32);
                 file_drag_content(&entries)
             });
-            let dragged_row = row.clone();
-            drag.connect_drag_begin(move |_, _| dragged_row.add_css_class("dragging"));
-            let dragged_row = row.clone();
+            let dragged_row = row.downgrade();
+            drag.connect_drag_begin(move |_, _| {
+                if let Some(row) = dragged_row.upgrade() {
+                    row.add_css_class("dragging");
+                }
+            });
+            let dragged_row = row.downgrade();
             drag.connect_drag_end(move |_, _, _| {
-                dragged_row.remove_css_class("dragging");
-                slide_out(&dragged_row);
+                if let Some(row) = dragged_row.upgrade() {
+                    row.remove_css_class("dragging");
+                    slide_out(&row);
+                }
             });
             row.add_controller(drag);
 
@@ -4885,20 +4948,34 @@ impl ViewState {
                 gtk::gdk::FileList::static_type(),
                 gtk::gdk::DragAction::COPY | gtk::gdk::DragAction::MOVE,
             );
-            let highlighted_row = row.clone();
-            let highlight = move |target: &gtk::DropTarget, _, _| {
-                highlighted_row.add_css_class("drop-destination");
+            let highlighted_row = row.downgrade();
+            drop.connect_enter(move |target, _, _| {
+                if let Some(row) = highlighted_row.upgrade() {
+                    row.add_css_class("drop-destination");
+                }
                 file_drop_action(target)
-            };
-            drop.connect_enter(highlight.clone());
-            drop.connect_motion(highlight);
-            let highlighted_row = row.clone();
-            drop.connect_leave(move |_| highlighted_row.remove_css_class("drop-destination"));
+            });
+            let highlighted_row = row.downgrade();
+            drop.connect_motion(move |target, _, _| {
+                if let Some(row) = highlighted_row.upgrade() {
+                    row.add_css_class("drop-destination");
+                }
+                file_drop_action(target)
+            });
+            let highlighted_row = row.downgrade();
+            drop.connect_leave(move |_| {
+                if let Some(row) = highlighted_row.upgrade() {
+                    row.remove_css_class("drop-destination");
+                }
+            });
             let weak_state_for_accept = weak_state.clone();
-            let accepted_item = item.clone();
+            let accepted_item = item.downgrade();
             let map_for_accept = map_for_hover.clone();
             drop.connect_accept(move |_, offered| {
                 let Some(state) = weak_state_for_accept.upgrade() else {
+                    return false;
+                };
+                let Some(accepted_item) = accepted_item.upgrade() else {
                     return false;
                 };
                 let entry = map_for_accept
@@ -4912,12 +4989,18 @@ impl ViewState {
                 })
             });
             let weak_state_for_drop = weak_state.clone();
-            let dropped_item = item.clone();
+            let dropped_item = item.downgrade();
             let map_for_drop = map_for_hover.clone();
-            let dropped_row = row.clone();
+            let dropped_row = row.downgrade();
             drop.connect_drop(move |target, value, _, _| {
+                let Some(dropped_row) = dropped_row.upgrade() else {
+                    return false;
+                };
                 dropped_row.remove_css_class("drop-destination");
                 let Some(state) = weak_state_for_drop.upgrade() else {
+                    return false;
+                };
+                let Some(dropped_item) = dropped_item.upgrade() else {
                     return false;
                 };
                 let Some(destination) = map_for_drop
@@ -4944,12 +5027,15 @@ impl ViewState {
             let weak_state_for_click = weak_state.clone();
             selection_click.set_button(1);
             selection_click.set_propagation_phase(gtk::PropagationPhase::Capture);
-            let clicked_item = item.clone();
+            let clicked_item = item.downgrade();
             let selection_for_click = selection_for_rows.clone();
             let selection_anchor_for_click = mouse_selection_anchor.clone();
             let modified_for_click = modified_selection_for_rows.clone();
             let map_for_click = map_for_hover.clone();
             selection_click.connect_pressed(move |gesture, press_count, _, _| {
+                let Some(clicked_item) = clicked_item.upgrade() else {
+                    return;
+                };
                 let position = clicked_item.position();
                 if position == gtk::INVALID_LIST_POSITION {
                     return;
@@ -5096,11 +5182,10 @@ impl ViewState {
             } else {
                 source_position.and_then(|position| browser?.entry_at(depth, position))
             };
-            let active = source_position.is_some_and(|position| {
+            let active = entry.as_ref().is_some_and(|entry| {
                 browser
                     .as_ref()
-                    .and_then(|browser| browser.active_child_position(depth))
-                    == Some(position)
+                    .is_some_and(|browser| browser.is_open_child(depth, &entry.location))
             });
             set_active_path_style(&row, active);
             set_cut_path_style(
@@ -5115,9 +5200,7 @@ impl ViewState {
                 let mode_active = state
                     .as_ref()
                     .is_some_and(|state| state.mode_views.borrow().mode() == BrowserMode::Columns);
-                if entry.is_directory() {
-                    super::thumbnail::show_fallback_icon(&icon, crate::assets::icons::FOLDER, 17);
-                } else if mode_active {
+                if entry.is_directory() || mode_active {
                     super::thumbnail::set_thumbnail_or_icon(
                         &icon,
                         entry,
@@ -5274,6 +5357,7 @@ impl ViewState {
             .vexpand(true)
             .build();
         scroll.add_css_class("fixed-scrollbar");
+        super::scrolling::install_autoscroll(&scroll, &self.overlay);
         let rows_for_marquee = bound_rows.clone();
         let marquee = super::marquee::install(super::marquee::MarqueeSetup {
             view: list.clone().upcast(),
@@ -5340,8 +5424,12 @@ impl ViewState {
             self,
             presentation.stack.upcast_ref(),
             {
-                let entries = selection.clone();
-                Rc::new(move || entries.n_items() > 0)
+                let entries = selection.downgrade();
+                Rc::new(move || {
+                    entries
+                        .upgrade()
+                        .is_some_and(|entries| entries.n_items() > 0)
+                })
             },
             Rc::new(|picked| is_file_row_target(picked.clone())),
             depth,
@@ -5388,9 +5476,9 @@ impl ViewState {
         let resize_start = Rc::new(Cell::new(COLUMN_WIDTH));
         let pointer_start = Rc::new(Cell::new(None));
         let last_press = Rc::new(Cell::new(0u64));
-        let shell_for_resize_start = shell.clone();
-        let shell_for_autofit = shell.clone();
-        let column_for_autofit = column.clone();
+        let shell_for_resize_start = shell.downgrade();
+        let shell_for_autofit = shell.downgrade();
+        let column_for_autofit = column.downgrade();
         let resize_start_for_begin = resize_start.clone();
         let pointer_start_for_begin = pointer_start.clone();
         let last_press_for_begin = last_press.clone();
@@ -5398,9 +5486,17 @@ impl ViewState {
             let now = glib::monotonic_time() as u64;
             let prev = last_press_for_begin.get();
             last_press_for_begin.set(now);
+            let Some(shell_for_autofit) = shell_for_autofit.upgrade() else {
+                return;
+            };
+            let Some(shell_for_resize_start) = shell_for_resize_start.upgrade() else {
+                return;
+            };
             if now.wrapping_sub(prev) <= 400_000 {
-                let max_natural =
-                    max_child_natural_width(column_for_autofit.upcast_ref::<gtk::Widget>());
+                let max_natural = column_for_autofit
+                    .upgrade()
+                    .map(|column| max_child_natural_width(column.upcast_ref::<gtk::Widget>()))
+                    .unwrap_or(COLUMN_WIDTH);
                 shell_for_autofit.set_size_request(max_natural.max(COLUMN_WIDTH), -1);
                 gesture.set_state(gtk::EventSequenceState::Denied);
                 return;
@@ -5412,8 +5508,11 @@ impl ViewState {
             }
             gesture.set_state(gtk::EventSequenceState::Claimed);
         });
-        let shell_for_resize = shell.clone();
+        let shell_for_resize = shell.downgrade();
         resize.connect_drag_update(move |gesture, fallback_offset_x, _| {
+            let Some(shell_for_resize) = shell_for_resize.upgrade() else {
+                return;
+            };
             let pointer_x = gesture
                 .current_event()
                 .and_then(|event| event.position())
@@ -5480,9 +5579,12 @@ impl ViewState {
         let animation_id = self.horizontal_scroll_generation.get().saturating_add(1);
         self.horizontal_scroll_generation.set(animation_id);
         let weak = Rc::downgrade(self);
-        let measured_shell = shell;
+        let measured_shell = shell.downgrade();
         let _tick = self.scroller.add_tick_callback(move |_, _| {
             let Some(state) = weak.upgrade() else {
+                return glib::ControlFlow::Break;
+            };
+            let Some(measured_shell) = measured_shell.upgrade() else {
                 return glib::ControlFlow::Break;
             };
             if state.horizontal_scroll_generation.get() != animation_id
@@ -5729,6 +5831,10 @@ impl ViewState {
             column
                 .animation_generation
                 .set(column.animation_generation.get().saturating_add(1));
+            column.syncing_selection.set(true);
+            column.selection.set_model(None::<&gio::ListModel>);
+            column.filtered_model.set_model(None::<&gio::ListModel>);
+            detach_collection_view(&column.list);
             self.columns_widget.remove(&column.shell);
             self.overlay.remove_overlay(&column.marquee.band());
         }
@@ -5876,6 +5982,56 @@ fn set_filter_placeholder(column: &ColumnView, count: usize) {
 
 pub(crate) const FILTER_DEBOUNCE_DELAY: Duration = Duration::from_millis(200);
 
+/// `scroll_to` before the view has a real height leaves ListView/GridView with a
+/// one-row widget pool, so scrolling after a mode switch stays janky.
+pub(crate) fn scroll_collection_when_allocated(view: &gtk::Widget, position: u32) {
+    if view.height() > 1 {
+        apply_collection_scroll(view, position);
+        return;
+    }
+    // ponytail: a few frames is enough for the first layout. Upgrade: a real
+    // allocate listener if GTK grows one that is safe to scroll from.
+    let frames = Cell::new(0u8);
+    view.add_tick_callback(move |view, _| {
+        if view.height() > 1 {
+            apply_collection_scroll(view, position);
+            return glib::ControlFlow::Break;
+        }
+        let waited = frames.get().saturating_add(1);
+        frames.set(waited);
+        if waited >= 8 {
+            glib::ControlFlow::Break
+        } else {
+            glib::ControlFlow::Continue
+        }
+    });
+}
+
+fn apply_collection_scroll(view: &gtk::Widget, position: u32) {
+    if let Ok(list) = view.clone().downcast::<gtk::ListView>() {
+        if position < list.model().map_or(0, |model| model.n_items()) {
+            list.scroll_to(position, gtk::ListScrollFlags::FOCUS, None);
+        }
+        return;
+    }
+    if let Ok(grid) = view.clone().downcast::<gtk::GridView>()
+        && position < grid.model().map_or(0, |model| model.n_items())
+    {
+        grid.scroll_to(position, gtk::ListScrollFlags::FOCUS, None);
+    }
+}
+
+pub(crate) fn detach_collection_view(view: &impl IsA<gtk::Widget>) {
+    let view = view.as_ref();
+    if let Ok(list) = view.clone().downcast::<gtk::ListView>() {
+        list.set_factory(None::<&gtk::ListItemFactory>);
+        list.set_model(None::<&gtk::SelectionModel>);
+    } else if let Ok(grid) = view.clone().downcast::<gtk::GridView>() {
+        grid.set_factory(None::<&gtk::ListItemFactory>);
+        grid.set_model(None::<&gtk::SelectionModel>);
+    }
+}
+
 pub(crate) fn debounce_filter_entry(entry: &gtk::Entry, on_settled: impl Fn(String) + 'static) {
     let pending: Rc<RefCell<Option<glib::SourceId>>> = Rc::new(RefCell::new(None));
     let on_settled = Rc::new(on_settled);
@@ -5901,6 +6057,21 @@ pub(crate) fn filter_change_for(previous: &str, settled: &str) -> gtk::FilterCha
     } else {
         gtk::FilterChange::Different
     }
+}
+
+pub(crate) fn notify_filter_query(
+    filter: &gtk::CustomFilter,
+    query: &RefCell<String>,
+    text: String,
+) {
+    let settled = text.to_lowercase();
+    let previous = query.borrow().clone();
+    if previous == settled {
+        return;
+    }
+    let change = filter_change_for(&previous, &settled);
+    *query.borrow_mut() = settled;
+    filter.changed(change);
 }
 
 pub(crate) fn apply_filter_query(
@@ -6129,6 +6300,13 @@ fn touch_source_model(column: &ColumnView) {
         .set(column.model_generation.get().saturating_add(1));
 }
 
+fn scroll_column_to(column: &ColumnView, position: u32) {
+    if position >= column.selection.n_items() {
+        return;
+    }
+    scroll_collection_when_allocated(column.list.upcast_ref(), position);
+}
+
 fn set_column_selection(column: &ColumnView, position: u32) {
     column.syncing_selection.set(true);
     column.selection.unselect_all();
@@ -6155,6 +6333,83 @@ fn bitset_positions(bitset: &gtk::Bitset) -> Vec<u32> {
     std::iter::once(first).chain(iterator).collect()
 }
 
+const CONTEXT_MENU_EDGE_MARGIN: i32 = 24;
+
+fn context_menu_placement(anchor_height: i32, click_y: f64) -> (gtk::PositionType, i32) {
+    let click_y = click_y.round() as i32;
+    let above = click_y.clamp(0, anchor_height);
+    let below = anchor_height.saturating_sub(above);
+    let (position, available_height) = if below >= above {
+        (gtk::PositionType::Bottom, below)
+    } else {
+        (gtk::PositionType::Top, above)
+    };
+
+    (
+        position,
+        available_height
+            .saturating_sub(CONTEXT_MENU_EDGE_MARGIN)
+            .max(1),
+    )
+}
+
+fn context_menu_popover(content: &impl IsA<gtk::Widget>) -> (gtk::Popover, gtk::ScrolledWindow) {
+    let scroll = gtk::ScrolledWindow::builder()
+        .child(content)
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .vscrollbar_policy(gtk::PolicyType::Automatic)
+        .propagate_natural_height(true)
+        .build();
+    scroll.add_css_class("context-menu-scroll");
+
+    (
+        gtk::Popover::builder()
+            .child(&scroll)
+            .autohide(true)
+            .has_arrow(false)
+            .build(),
+        scroll,
+    )
+}
+
+fn context_popover_overlay(anchor: &gtk::Widget) -> Option<gtk::Overlay> {
+    anchor
+        .root()
+        .and_downcast::<gtk::Window>()
+        .and_then(|window| window.child())
+        .and_downcast::<gtk::Overlay>()
+}
+
+fn show_context_popover(
+    popover: &gtk::Popover,
+    scroll: &gtk::ScrolledWindow,
+    anchor: &gtk::Widget,
+    x: f64,
+    y: f64,
+) {
+    let Some(overlay) = context_popover_overlay(anchor) else {
+        return;
+    };
+    if popover.parent().is_none() {
+        overlay.add_overlay(popover);
+    }
+    let point = anchor
+        .compute_point(&overlay, &gtk::graphene::Point::new(x as f32, y as f32))
+        .unwrap_or(gtk::graphene::Point::new(x as f32, y as f32));
+    let (position, max_content_height) =
+        context_menu_placement(overlay.height(), f64::from(point.y()));
+    popover.set_position(position);
+    scroll.set_max_content_height(max_content_height);
+    popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(
+        point.x().round() as i32,
+        point.y().round() as i32,
+        1,
+        1,
+    )));
+    popover.popup();
+    popover.present();
+}
+
 pub(super) fn install_folder_context_menu(
     state: &Rc<ViewState>,
     parent: &gtk::Widget,
@@ -6165,11 +6420,7 @@ pub(super) fn install_folder_context_menu(
 ) {
     let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
     content.add_css_class("folder-context-menu");
-    let popover = gtk::Popover::builder()
-        .child(&content)
-        .autohide(true)
-        .has_arrow(false)
-        .build();
+    let (popover, scroll) = context_menu_popover(&content);
     popover.add_css_class("folder-context-popover");
 
     let new_folder = context_menu_option(
@@ -6309,6 +6560,7 @@ pub(super) fn install_folder_context_menu(
     menu_click.set_button(3);
     let popover_for_click = popover.clone();
     let browser_for_click = state.browser.clone();
+    let scroll_for_click = scroll.clone();
     menu_click.connect_pressed(move |gesture, _, x, y| {
         let over_item = gesture
             .widget()
@@ -6340,18 +6592,9 @@ pub(super) fn install_folder_context_menu(
                 crate::assets::icons::EYE_OFF
             },
         );
-        if popover_for_click.parent().is_none()
-            && let Some(parent) = gesture.widget()
-        {
-            popover_for_click.set_parent(&parent);
+        if let Some(anchor) = gesture.widget() {
+            show_context_popover(&popover_for_click, &scroll_for_click, &anchor, x, y);
         }
-        popover_for_click.set_pointing_to(Some(&gtk::gdk::Rectangle::new(
-            x.round() as i32,
-            y.round() as i32,
-            1,
-            1,
-        )));
-        popover_for_click.popup();
     });
     parent.add_controller(menu_click);
 }
@@ -6392,7 +6635,8 @@ pub(super) fn install_item_context_menu(
     header.append(&heading);
     header.append(&summary);
     content.append(&header);
-    content.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+    let header_separator = gtk::Separator::new(gtk::Orientation::Horizontal);
+    content.append(&header_separator);
 
     let single = gtk::Box::new(gtk::Orientation::Vertical, 0);
     let open = item_context_option(crate::assets::icons::EXTERNAL_LINK, "Open", "↵");
@@ -6428,6 +6672,7 @@ pub(super) fn install_item_context_menu(
     );
     permanent_delete.add_css_class("danger");
     let properties = item_context_option(crate::assets::icons::INFO, "Properties", "Alt+Enter");
+    let customize = item_context_option(crate::assets::icons::PALETTE, "Customize…", "");
     let compress = item_context_option(crate::assets::icons::FILE_ARCHIVE, "Compress…", "");
     let extract = item_context_option(crate::assets::icons::FILE_ARCHIVE, "Extract here", "");
     let extract_to = item_context_option(crate::assets::icons::FILE_ARCHIVE, "Extract to…", "");
@@ -6450,6 +6695,7 @@ pub(super) fn install_item_context_menu(
     single.append(&rename);
     single.append(&compress);
     single.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+    single.append(&customize);
     single.append(&properties);
     single.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
     single.append(&move_to_trash);
@@ -6494,13 +6740,9 @@ pub(super) fn install_item_context_menu(
     multiple.set_visible(false);
     content.append(&multiple);
 
-    let popover = gtk::Popover::builder()
-        .child(&content)
-        .autohide(true)
-        .has_arrow(false)
-        .build();
+    let (popover, scroll) = context_menu_popover(&content);
     popover.add_css_class("folder-context-popover");
-    popover.set_parent(widget);
+    popover.connect_closed(|popover| popover.unparent());
 
     let target = Rc::new(RefCell::new(None::<(usize, FileEntry)>));
     let weak = Rc::downgrade(state);
@@ -6660,11 +6902,35 @@ pub(super) fn install_item_context_menu(
             copy_locations(&context_entries(&state, &paths_target));
         }
     });
+    let weak = Rc::downgrade(state);
+    let customize_target = target.clone();
+    let customize_popover = popover.downgrade();
+    customize.connect_clicked(move |_| {
+        if let Some(popover) = customize_popover.upgrade() {
+            popover.popdown();
+        }
+        let Some((_, entry)) = customize_target.borrow().clone() else {
+            return;
+        };
+        let Some(state) = weak.upgrade() else {
+            return;
+        };
+        let Some(path) = entry.location.native_path() else {
+            return;
+        };
+        show_customize_modal(
+            &state.overlay,
+            path.to_path_buf(),
+            entry.is_directory(),
+            entry_icon(&entry),
+        );
+    });
 
     let click = gtk::GestureClick::new();
     click.set_button(3);
     let weak_state = Rc::downgrade(state);
-    let weak_popover = popover.downgrade();
+    let popover_for_reveal = popover.clone();
+    let scroll_for_reveal = scroll.clone();
     let selection = selection.clone();
     click.connect_pressed(move |gesture, _, x, y| {
         let Some(picked) = gesture
@@ -6710,6 +6976,8 @@ pub(super) fn install_item_context_menu(
         );
         extract.set_visible(ArchiveFormat::from_extension(&entry.display_name).is_some());
         extract_to.set_visible(ArchiveFormat::from_extension(&entry.display_name).is_some());
+        customize
+            .set_visible(!in_trash && entries.len() == 1 && entry.location.native_path().is_some());
         if entries.len() > 1 {
             heading.set_text(&format!("{} items selected", entries.len()));
             summary.set_text(&selected_items_summary(&entries));
@@ -6721,16 +6989,10 @@ pub(super) fn install_item_context_menu(
             single.set_visible(true);
             multiple.set_visible(false);
         }
-        let Some(popover) = weak_popover.upgrade() else {
+        let Some(anchor) = gesture.widget() else {
             return;
         };
-        popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(
-            x.round() as i32,
-            y.round() as i32,
-            1,
-            1,
-        )));
-        popover.popup();
+        show_context_popover(&popover_for_reveal, &scroll_for_reveal, &anchor, x, y);
     });
     widget.add_controller(click);
 }
@@ -9195,6 +9457,587 @@ fn properties_row(parent: &gtk::Box, label: &str, value: &str) -> gtk::Label {
     row.append(&value);
     parent.append(&row);
     value
+}
+
+fn rgba_to_hex(rgba: &gdk::RGBA) -> String {
+    format!(
+        "#{:02x}{:02x}{:02x}",
+        (rgba.red() * 255.0).round() as u8,
+        (rgba.green() * 255.0).round() as u8,
+        (rgba.blue() * 255.0).round() as u8,
+    )
+}
+
+#[expect(
+    deprecated,
+    reason = "ColorChooserWidget is embedded directly inside in-app modal instead of external window"
+)]
+fn show_custom_color_modal(
+    parent: &impl IsA<gtk::Widget>,
+    initial_color: Option<&str>,
+    preview_icon: &'static str,
+    item_label: &'static str,
+    on_confirm: impl Fn(FolderColorValue) + 'static,
+) {
+    let Some(window_overlay) = parent
+        .root()
+        .and_downcast::<gtk::Window>()
+        .and_then(|window| window.child())
+        .and_downcast::<gtk::Overlay>()
+    else {
+        return;
+    };
+    let blurred_root = window_overlay.child().and_downcast::<BlurBin>();
+    if let Some(root) = blurred_root.as_ref() {
+        root.set_blurred(true);
+    }
+    if let Some(popover) = parent
+        .ancestor(gtk::Popover::static_type())
+        .and_downcast::<gtk::Popover>()
+    {
+        popover.popdown();
+    }
+
+    let item_title = if item_label == "folder" {
+        "Folder"
+    } else {
+        "File"
+    };
+    let title = format!("Custom {item_title} Color");
+    let subtitle = format!("Choose a color for this {item_label}");
+    let layout = modal_layout(preview_icon, &title, &subtitle, "Apply");
+    layout.close.set_visible(false);
+
+    let modal_icon = layout.icon.clone();
+    let initial_val = initial_color
+        .and_then(FolderColorValue::parse)
+        .unwrap_or_else(|| FolderColorValue::Custom("#34d399".to_owned()));
+    let initial_hex = initial_val.hex().to_owned();
+
+    crate::assets::set_custom_colored_icon(&modal_icon, preview_icon, &initial_hex);
+
+    let chooser = gtk::ColorChooserWidget::new();
+    chooser.set_use_alpha(false);
+    if let Ok(rgba) = gdk::RGBA::parse(&initial_hex) {
+        chooser.set_rgba(&rgba);
+    }
+
+    let icon_for_notify = modal_icon.clone();
+    chooser.connect_rgba_notify(move |c| {
+        let hex = rgba_to_hex(&c.rgba());
+        crate::assets::set_custom_colored_icon(&icon_for_notify, preview_icon, &hex);
+    });
+
+    layout.body.append(&chooser);
+
+    let content = layout.content;
+    let cancel = layout.cancel;
+    let confirm = layout.confirm;
+
+    let back = gtk::Button::new();
+    back.add_css_class("action-dialog-cancel");
+    let back_icon = crate::assets::primary_icon(crate::assets::icons::ARROW_LEFT, 14);
+    back.set_child(Some(&back_icon));
+    back.set_tooltip_text(Some("Back to palette"));
+    back.set_visible(false);
+    layout.actions.prepend(&back);
+
+    let chooser_for_back = chooser.clone();
+    back.connect_clicked(move |_| {
+        chooser_for_back.set_property("show-editor", false);
+    });
+
+    let back_btn = back.clone();
+    let subtitle_label = layout.subtitle.clone();
+    chooser.connect_notify_local(Some("show-editor"), move |c, _| {
+        let in_editor = c.property::<bool>("show-editor");
+        back_btn.set_visible(in_editor);
+        if in_editor {
+            subtitle_label.set_text(&format!("Customize {item_label} color"));
+        } else {
+            subtitle_label.set_text(&format!("Choose a color for this {item_label}"));
+        }
+    });
+
+    let layer = modal_layer(&content, &window_overlay, blurred_root.clone(), None);
+    window_overlay.add_overlay(&layer);
+
+    let on_confirm = Rc::new(on_confirm);
+    let confirm_layer = layer.clone();
+    let confirm_overlay = window_overlay.clone();
+    let confirm_root = blurred_root.clone();
+    let chooser_for_confirm = chooser.clone();
+    let on_confirm_click = on_confirm.clone();
+    confirm.connect_clicked(move |_| {
+        let hex = rgba_to_hex(&chooser_for_confirm.rgba());
+        dismiss_modal_layer(&confirm_layer, &confirm_overlay, confirm_root.as_ref());
+        on_confirm_click(FolderColorValue::Custom(hex));
+    });
+
+    let cancel_layer = layer.clone();
+    let cancel_overlay = window_overlay.clone();
+    let cancel_root = blurred_root.clone();
+    cancel.connect_clicked(move |_| {
+        dismiss_modal_layer(&cancel_layer, &cancel_overlay, cancel_root.as_ref());
+    });
+
+    let keys = gtk::EventControllerKey::new();
+    keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let escape_layer = layer.clone();
+    let escape_overlay = window_overlay;
+    let escape_root = blurred_root;
+    let chooser_for_escape = chooser.clone();
+    keys.connect_key_pressed(move |_, key, _, _| {
+        if key == gtk::gdk::Key::Escape {
+            if chooser_for_escape.property::<bool>("show-editor") {
+                chooser_for_escape.set_property("show-editor", false);
+                glib::Propagation::Stop
+            } else {
+                dismiss_modal_layer(&escape_layer, &escape_overlay, escape_root.as_ref());
+                glib::Propagation::Stop
+            }
+        } else {
+            glib::Propagation::Proceed
+        }
+    });
+    layer.add_controller(keys);
+
+    chooser.grab_focus();
+}
+
+fn show_customize_modal(
+    parent: &impl IsA<gtk::Widget>,
+    path: PathBuf,
+    is_directory: bool,
+    fallback_icon: &'static str,
+) {
+    let Some(window_overlay) = parent
+        .root()
+        .and_downcast::<gtk::Window>()
+        .and_then(|window| window.child())
+        .and_downcast::<gtk::Overlay>()
+    else {
+        return;
+    };
+    let blurred_root = window_overlay.child().and_downcast::<BlurBin>();
+    if let Some(root) = blurred_root.as_ref() {
+        root.set_blurred(true);
+    }
+    if let Some(popover) = parent
+        .ancestor(gtk::Popover::static_type())
+        .and_downcast::<gtk::Popover>()
+    {
+        popover.popdown();
+    }
+
+    let item_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.to_string_lossy().into_owned());
+    let item_kind = if is_directory {
+        "Customize Folder"
+    } else {
+        "Customize File"
+    };
+    let layout = modal_layout(crate::assets::icons::PALETTE, item_kind, &item_name, "Done");
+    layout.content.add_css_class("customize-dialog");
+    layout
+        .subtitle
+        .set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+    layout.subtitle.set_max_width_chars(36);
+    layout.cancel.set_visible(false);
+
+    let theme_manager = super::theme::ThemeManager::shared();
+    let initial_color = theme_manager.folder_color(&path);
+    let initial_icon = theme_manager.custom_icon(&path);
+
+    let preview = gtk::Box::new(gtk::Orientation::Vertical, 7);
+    preview.add_css_class("customize-preview");
+    preview.set_halign(gtk::Align::Center);
+    let preview_icon = gtk::Image::new();
+    preview_icon.add_css_class("customize-preview-icon");
+    super::thumbnail::show_customized_icon(&preview_icon, &path, fallback_icon, 56);
+    let preview_name = gtk::Label::new(Some(&item_name));
+    preview_name.add_css_class("customize-preview-name");
+    preview_name.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+    preview_name.set_max_width_chars(30);
+    preview.append(&preview_icon);
+    preview.append(&preview_name);
+    layout.body.append(&preview);
+
+    let clear = gtk::Button::with_label("Clear");
+    clear.add_css_class("action-dialog-cancel");
+    clear.set_sensitive(initial_color.is_some() || initial_icon.is_some());
+    layout
+        .actions
+        .insert_child_after(&clear, Some(&layout.cancel));
+
+    let color_section = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    color_section.add_css_class("customize-section");
+    let color_label = gtk::Label::new(Some("COLOR"));
+    color_label.add_css_class("customize-section-label");
+    color_label.set_xalign(0.0);
+    color_section.append(&color_label);
+
+    let color_path = path.clone();
+    let color_preview = preview_icon.clone();
+    let clear_for_color = clear.clone();
+    let item_label = if is_directory { "folder" } else { "file" };
+    let color_bar = build_folder_color_bar(
+        initial_color,
+        fallback_icon,
+        item_label,
+        move |selected_color| {
+            super::theme::ThemeManager::shared().set_folder_color(&color_path, selected_color);
+            super::thumbnail::show_customized_icon(&color_preview, &color_path, fallback_icon, 56);
+            clear_for_color.set_sensitive(true);
+        },
+    );
+    color_section.append(&color_bar.container);
+    layout.body.append(&color_section);
+
+    let section = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    section.add_css_class("customize-section");
+    section.add_css_class("separated");
+    let label = gtk::Label::new(Some("ICON"));
+    label.add_css_class("customize-section-label");
+    label.set_xalign(0.0);
+    section.append(&label);
+
+    let icon_grid = gtk::FlowBox::new();
+    icon_grid.add_css_class("customize-icon-grid");
+    icon_grid.set_selection_mode(gtk::SelectionMode::None);
+    icon_grid.set_homogeneous(true);
+    icon_grid.set_min_children_per_line(4);
+    icon_grid.set_max_children_per_line(8);
+    icon_grid.set_row_spacing(6);
+    icon_grid.set_column_spacing(6);
+
+    let icon_buttons: Rc<Vec<_>> = Rc::new(
+        crate::assets::icons::CUSTOMIZATION_CHOICES
+            .iter()
+            .map(|&(icon_name, label)| {
+                let button = gtk::Button::new();
+                button.add_css_class("customize-icon-button");
+                button.set_tooltip_text(Some(label));
+                button.update_property(&[gtk::accessible::Property::Label(label)]);
+                button.set_child(Some(&crate::assets::primary_icon(icon_name, 20)));
+                if initial_icon.as_deref() == Some(icon_name) {
+                    button.add_css_class("active");
+                }
+                icon_grid.append(&button);
+                (icon_name, button)
+            })
+            .collect(),
+    );
+
+    let selected_emoji = initial_icon
+        .as_deref()
+        .and_then(crate::assets::icons::custom_emoji);
+    let emoji_button = gtk::Button::with_label(&selected_emoji.map_or_else(
+        || "Choose Emoji…".to_owned(),
+        |emoji| format!("Emoji  {emoji}"),
+    ));
+    emoji_button.add_css_class("customize-emoji-button");
+    emoji_button.update_property(&[gtk::accessible::Property::Description(
+        "Choose any emoji for this item",
+    )]);
+    let emoji_chooser = gtk::EmojiChooser::new();
+    emoji_chooser.add_css_class("customize-emoji-chooser");
+    emoji_chooser.set_parent(&emoji_button);
+    let chooser_for_button = emoji_chooser.clone();
+    emoji_button.connect_clicked(move |_| chooser_for_button.popup());
+
+    for (icon_name, button) in icon_buttons.iter() {
+        let selected_name = *icon_name;
+        let buttons = icon_buttons.clone();
+        let icon_path = path.clone();
+        let preview = preview_icon.clone();
+        let clear_for_icon = clear.clone();
+        let emoji_for_icon = emoji_button.clone();
+        button.connect_clicked(move |_| {
+            for (name, button) in buttons.iter() {
+                if *name == selected_name {
+                    button.add_css_class("active");
+                } else {
+                    button.remove_css_class("active");
+                }
+            }
+            emoji_for_icon.set_label("Choose Emoji…");
+            super::theme::ThemeManager::shared().set_custom_icon(&icon_path, Some(selected_name));
+            super::thumbnail::show_customized_icon(&preview, &icon_path, fallback_icon, 56);
+            clear_for_icon.set_sensitive(true);
+        });
+    }
+
+    let buttons_for_emoji = icon_buttons.clone();
+    let emoji_path = path.clone();
+    let emoji_preview = preview_icon.clone();
+    let clear_for_emoji = clear.clone();
+    let emoji_label = emoji_button.clone();
+    emoji_chooser.connect_emoji_picked(move |chooser, emoji| {
+        let preference = format!("emoji:{emoji}");
+        for (_, button) in buttons_for_emoji.iter() {
+            button.remove_css_class("active");
+        }
+        emoji_label.set_label(&format!("Emoji  {emoji}"));
+        super::theme::ThemeManager::shared().set_custom_icon(&emoji_path, Some(&preference));
+        super::thumbnail::show_customized_icon(&emoji_preview, &emoji_path, fallback_icon, 56);
+        clear_for_emoji.set_sensitive(true);
+        chooser.popdown();
+    });
+
+    section.append(&icon_grid);
+    section.append(&emoji_button);
+    layout.body.append(&section);
+
+    let reset_color_ui = color_bar.update_active;
+    let clear_path = path.clone();
+    let clear_preview = preview_icon;
+    let buttons_for_clear = icon_buttons;
+    let emoji_for_clear = emoji_button;
+    clear.connect_clicked(move |button| {
+        super::theme::ThemeManager::shared().clear_item_customization(&clear_path);
+        reset_color_ui(None);
+        for (_, icon_button) in buttons_for_clear.iter() {
+            icon_button.remove_css_class("active");
+        }
+        emoji_for_clear.set_label("Choose Emoji…");
+        super::thumbnail::show_customized_icon(&clear_preview, &clear_path, fallback_icon, 56);
+        button.set_sensitive(false);
+    });
+
+    let content = layout.content;
+    let confirm = layout.confirm;
+    let layer = modal_layer(&content, &window_overlay, blurred_root.clone(), None);
+    window_overlay.add_overlay(&layer);
+
+    let dismiss = {
+        let layer = layer.clone();
+        let overlay = window_overlay.clone();
+        let root = blurred_root.clone();
+        move || dismiss_modal_layer(&layer, &overlay, root.as_ref())
+    };
+    let done_dismiss = dismiss.clone();
+    confirm.connect_clicked(move |_| done_dismiss());
+    layout.close.connect_clicked(move |_| dismiss());
+
+    let keys = gtk::EventControllerKey::new();
+    keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let escape_layer = layer.clone();
+    let escape_overlay = window_overlay;
+    let escape_root = blurred_root;
+    keys.connect_key_pressed(move |_, key, _, _| {
+        if key == gtk::gdk::Key::Escape {
+            dismiss_modal_layer(&escape_layer, &escape_overlay, escape_root.as_ref());
+            glib::Propagation::Stop
+        } else {
+            glib::Propagation::Proceed
+        }
+    });
+    layer.add_controller(keys);
+}
+
+struct FolderColorBar {
+    container: gtk::Box,
+    update_active: Rc<dyn Fn(Option<FolderColorValue>)>,
+}
+
+fn build_folder_color_bar(
+    initial_color: Option<FolderColorValue>,
+    preview_icon: &'static str,
+    item_label: &'static str,
+    on_color_selected: impl Fn(Option<FolderColorValue>) + 'static,
+) -> FolderColorBar {
+    let container = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    container.add_css_class("folder-color-bar");
+
+    let active_state = Rc::new(RefCell::new(initial_color.clone()));
+    let on_select = Rc::new(on_color_selected);
+
+    let theme_btn = gtk::Button::new();
+    theme_btn.set_has_frame(false);
+    theme_btn.add_css_class("folder-color-dot");
+    theme_btn.add_css_class("folder-color-theme");
+    theme_btn.set_tooltip_text(Some("Default (Theme color)"));
+    let theme_icon = crate::assets::primary_icon(crate::assets::icons::PALETTE, 12);
+    theme_btn.set_child(Some(&theme_icon));
+    container.append(&theme_btn);
+
+    let mut color_dots = Vec::new();
+    for &color in &FolderColor::ALL {
+        let dot = gtk::Button::new();
+        dot.set_has_frame(false);
+        dot.add_css_class("folder-color-dot");
+        dot.add_css_class(color.css_class());
+        dot.set_tooltip_text(Some(color.name()));
+        let check = gtk::Image::from_icon_name(crate::assets::icons::CHECK_ON_PRIMARY);
+        check.set_pixel_size(10);
+        check.set_visible(false);
+        dot.set_child(Some(&check));
+        container.append(&dot);
+        color_dots.push((color, dot, check));
+    }
+
+    let custom_btn = gtk::Button::new();
+    custom_btn.set_has_frame(false);
+    custom_btn.add_css_class("folder-color-dot");
+    custom_btn.add_css_class("folder-color-custom");
+    custom_btn.set_tooltip_text(Some("Custom color…"));
+
+    let custom_stack = gtk::Stack::new();
+    custom_stack.set_transition_type(gtk::StackTransitionType::None);
+    let custom_plus = crate::assets::primary_icon(crate::assets::icons::PLUS, 10);
+    custom_stack.add_named(&custom_plus, Some("plus"));
+
+    let hex_for_draw = Rc::new(RefCell::new(None::<String>));
+    let custom_dot = gtk::DrawingArea::new();
+    custom_dot.set_content_width(20);
+    custom_dot.set_content_height(20);
+    let hex_draw = hex_for_draw.clone();
+    custom_dot.set_draw_func(move |_, cr, width, height| {
+        let Some(hex) = hex_draw.borrow().clone() else {
+            return;
+        };
+        let Ok(rgba) = gdk::RGBA::parse(&hex) else {
+            return;
+        };
+        let w = f64::from(width);
+        let h = f64::from(height);
+        let r = (w.min(h) / 2.0) - 1.0;
+        let cx = w / 2.0;
+        let cy = h / 2.0;
+
+        cr.set_source_rgba(
+            f64::from(rgba.red()),
+            f64::from(rgba.green()),
+            f64::from(rgba.blue()),
+            1.0,
+        );
+        cr.arc(cx, cy, r, 0.0, 2.0 * std::f64::consts::PI);
+        let _ = cr.fill();
+
+        cr.set_source_rgba(0.0, 0.0, 0.0, 0.25);
+        cr.set_line_width(1.0);
+        cr.arc(cx, cy, r, 0.0, 2.0 * std::f64::consts::PI);
+        let _ = cr.stroke();
+
+        cr.set_source_rgba(1.0, 1.0, 1.0, 0.95);
+        cr.set_line_width(1.8);
+        cr.move_to(cx - 3.5, cy);
+        cr.line_to(cx - 1.0, cy + 2.8);
+        cr.line_to(cx + 3.8, cy - 2.8);
+        let _ = cr.stroke();
+    });
+    custom_stack.add_named(&custom_dot, Some("dot"));
+    custom_stack.set_visible_child_name("plus");
+    custom_btn.set_child(Some(&custom_stack));
+    container.append(&custom_btn);
+
+    let update_active: Rc<dyn Fn(Option<FolderColorValue>)> = {
+        let active_state = active_state.clone();
+        let theme_btn = theme_btn.clone();
+        let color_dots = color_dots.clone();
+        let custom_btn = custom_btn.clone();
+        let custom_stack = custom_stack.clone();
+        let custom_dot = custom_dot.clone();
+        let hex_for_draw = hex_for_draw.clone();
+        Rc::new(move |new_color| {
+            active_state.replace(new_color.clone());
+            match &new_color {
+                None | Some(FolderColorValue::Preset(_)) => {
+                    if new_color.is_none() {
+                        theme_btn.add_css_class("active");
+                    } else {
+                        theme_btn.remove_css_class("active");
+                    }
+                    custom_btn.remove_css_class("active");
+                    custom_stack.set_visible_child_name("plus");
+                    custom_btn.set_tooltip_text(Some("Custom color…"));
+                    hex_for_draw.replace(None);
+                }
+                Some(FolderColorValue::Custom(hex)) => {
+                    theme_btn.remove_css_class("active");
+                    custom_btn.add_css_class("active");
+                    custom_stack.set_visible_child_name("dot");
+                    custom_btn.set_tooltip_text(Some(&format!("Custom ({hex})")));
+                    hex_for_draw.replace(Some(hex.clone()));
+                    custom_dot.queue_draw();
+                }
+            }
+            for (color, dot, check) in &color_dots {
+                let is_match =
+                    matches!(&new_color, Some(FolderColorValue::Preset(p)) if p == color);
+                if is_match {
+                    dot.add_css_class("active");
+                } else {
+                    dot.remove_css_class("active");
+                }
+                check.set_visible(is_match);
+            }
+        })
+    };
+
+    update_active(initial_color);
+
+    {
+        let active_state = active_state.clone();
+        let update_ui = update_active.clone();
+        let on_select = on_select.clone();
+        theme_btn.connect_clicked(move |_| {
+            active_state.replace(None);
+            update_ui(None);
+            on_select(None);
+        });
+    }
+
+    for (color, dot, _) in color_dots {
+        let active_state = active_state.clone();
+        let update_ui = update_active.clone();
+        let on_select = on_select.clone();
+        dot.connect_clicked(move |_| {
+            let next_color = if matches!(
+                active_state.borrow().as_ref(),
+                Some(FolderColorValue::Preset(p)) if *p == color
+            ) {
+                None
+            } else {
+                Some(FolderColorValue::Preset(color))
+            };
+            active_state.replace(next_color.clone());
+            update_ui(next_color.clone());
+            on_select(next_color);
+        });
+    }
+
+    {
+        let active_state = active_state.clone();
+        let update_ui = update_active.clone();
+        let on_select = on_select.clone();
+        custom_btn.connect_clicked(move |btn| {
+            let initial_hex = active_state.borrow().as_ref().map(|v| v.hex().to_owned());
+            let active_state = active_state.clone();
+            let update_ui = update_ui.clone();
+            let on_select = on_select.clone();
+            show_custom_color_modal(
+                btn,
+                initial_hex.as_deref(),
+                preview_icon,
+                item_label,
+                move |value| {
+                    let val = Some(value);
+                    active_state.replace(val.clone());
+                    update_ui(val.clone());
+                    on_select(val);
+                },
+            );
+        });
+    }
+
+    FolderColorBar {
+        container,
+        update_active,
+    }
 }
 
 #[derive(Clone)]
