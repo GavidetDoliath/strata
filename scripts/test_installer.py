@@ -40,6 +40,40 @@ class InstallerTests(unittest.TestCase):
         self.assertIn("Interactive installer", result.stdout)
         self.assertNotIn("\033", result.stdout)
 
+    def test_unattended_flags_select_only_requested_integrations(self) -> None:
+        result = bash(
+            "parse_args --with-folder-association --with-raw; "
+            'printf "%s %s %s %s %s %s" "$NON_INTERACTIVE" "$WITH_SMB" '
+            '"$WITH_RAW" "$WITH_DESKTOP_ENTRY" "$WITH_FOLDER_ASSOCIATION" '
+            '"$WITH_OMARCHY_KEYBINDS"'
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "yes ask yes yes yes ask")
+
+    def test_non_interactive_mode_declines_unspecified_options(self) -> None:
+        result = bash("NON_INTERACTIVE=yes; ! want_option ask ignored")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_non_interactive_pacman_disables_sudo_and_pacman_prompts(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            fake_sudo = pathlib.Path(directory) / "sudo"
+            fake_sudo.write_text('#!/bin/sh\nprintf "%s\\n" "$@"\n')
+            fake_sudo.chmod(0o755)
+            result = bash(
+                "NON_INTERACTIVE=yes; run_pacman gvfs-smb",
+                env={"PATH": f"{directory}:{os.environ['PATH']}"},
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(),
+            ["-n", "pacman", "-S", "--needed", "--noconfirm", "--", "gvfs-smb"],
+        )
+
+    def test_unknown_installer_option_is_rejected(self) -> None:
+        result = bash("parse_args --definitely-unknown")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Unknown option", result.stderr)
+
     def test_version_comparison_accepts_minimum_and_newer(self) -> None:
         for version in ("2.39", "2.39.1", "2.40"):
             with self.subTest(version=version):

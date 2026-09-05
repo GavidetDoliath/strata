@@ -26,6 +26,7 @@ Strata combines spatial Miller-column navigation with familiar Grid and Explorer
 
 - [Features](#features)
 - [Installation](#installation)
+  - [Interactive installation](#interactive-installation)
   - [AI-assisted installation](#ai-assisted-installation)
   - [Manual installation](#manual-installation)
 - [Usage and desktop integration](#usage-and-desktop-integration)
@@ -58,6 +59,40 @@ Strata combines spatial Miller-column navigation with familiar Grid and Explorer
 ## Installation
 
 Arch Linux and Omarchy are the primary supported environments. Current binaries require **glibc 2.39 or newer** and the runtime libraries listed below.
+
+### Interactive installation
+
+The interactive installer detects the Linux architecture, glibc version, Arch
+Linux, and Omarchy 3 or 4. It installs the latest verified stable release and
+offers optional desktop-menu, default-folder-handler, SMB, broader image/RAW,
+and Omarchy keybind integration:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/lgse/strata/main/install.sh | bash
+```
+
+The installer shows every privileged package operation before asking to run it.
+It verifies both the published SHA-256 digest and GitHub Actions provenance before
+installing anything from the release archive. The binary is installed per-user at
+`~/.local/bin/strata`.
+
+For an unattended Arch or Omarchy installation, pass `--non-interactive`. This
+installs required dependencies and the binary without prompting; optional
+integrations remain disabled unless explicitly selected:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/lgse/strata/main/install.sh \
+  | bash -s -- --non-interactive \
+      --with-smb \
+      --with-raw \
+      --with-desktop-entry \
+      --with-folder-association \
+      --with-omarchy-keybinds
+```
+
+Each `--with-*` flag implies `--non-interactive`, and folder association implies
+the desktop entry. Non-interactive package installation requires passwordless
+sudo or cached credentials. Run `./install.sh --help` for the full option list.
 
 ### AI-assisted installation
 
@@ -93,24 +128,7 @@ Then:
   desktop association if one was requested. Do not weaken the preview sandbox.
 ```
 
-### Manual release installation
-
-The interactive installer detects the Linux architecture, glibc version, Arch
-Linux, and Omarchy 3 or 4. It installs the latest verified stable release and
-offers optional desktop-menu, default-folder-handler, SMB, and Omarchy keybind
-integration:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/lgse/strata/main/install.sh | bash
-```
-
-The installer shows every privileged package operation before asking to run it.
-It verifies both the published SHA-256 digest and GitHub Actions provenance before
-installing anything from the release archive. The binary is installed per-user at
-`~/.local/bin/strata`.
-
-<details>
-<summary>Manual download and verification</summary>
+### Manual installation
 
 Install the release archive directly if you prefer to perform each step yourself.
 
@@ -159,15 +177,13 @@ strata
 
 If `command -v` fails, add `$HOME/.local/bin` to your shell's `PATH`. Every archive contains `SOURCE_COMMIT`, identifying the exact source revision used by GitHub Actions.
 
-</details>
-
 #### Debug a release crash
 
 Download the matching `strata-<version>-<target>.debug` asset from the same release and place it beside the installed `strata` binary, keeping its filename unchanged. Then run `coredumpctl debug strata`; GDB will load its Rust function names and source lines.
 
 #### 3. Update or uninstall
 
-For a manual release installation, use **Settings → Updates** for verified in-app updates, or repeat the download, verification, and `install` steps for a newer release. An in-app update also refreshes an already installed desktop entry and application icon from the new archive; it never creates desktop metadata that was not installed before. Package-managed installations are updated only by their system package manager. To remove a per-user installation:
+For a manual installation, use **Settings → Updates** for verified in-app updates, or repeat the download, verification, and `install` steps for a newer release. An in-app update also refreshes an already installed desktop entry and application icon from the new archive; it never creates desktop metadata that was not installed before. Package-managed installations are updated only by their system package manager. To remove a per-user installation:
 
 ```bash
 rm -f ~/.local/bin/strata \

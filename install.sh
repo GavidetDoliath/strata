@@ -9,6 +9,14 @@ REQUIRED_PACKAGES=(
   bubblewrap desktop-file-utils ffmpeg ffmpegthumbnailer fontconfig gst-libav
   gst-plugins-good gtk4 gtksourceview5 poppler-glib github-cli xdg-utils
 )
+RAW_PREVIEW_PACKAGES=(imagemagick libraw dcraw)
+
+NON_INTERACTIVE=no
+WITH_SMB=ask
+WITH_RAW=ask
+WITH_DESKTOP_ENTRY=ask
+WITH_FOLDER_ASSOCIATION=ask
+WITH_OMARCHY_KEYBINDS=ask
 
 info() {
   printf '\n\033[1;34m==>\033[0m %s\n' "$*"
@@ -71,6 +79,58 @@ prompt() {
   [[ $answer == [Yy] || $answer == [Yy][Ee][Ss] ]]
 }
 
+usage() {
+  cat <<'EOF'
+Usage: install.sh [options]
+
+Without options, Strata asks about dependencies and desktop integration.
+
+Options:
+  --non-interactive             Never prompt; install required components only
+  --with-smb                    Install SMB network-share support
+  --with-raw                    Install broader image and camera RAW support
+  --with-desktop-entry          Add Strata to the desktop application menu
+  --with-folder-association     Make Strata the default folder handler
+  --with-omarchy-keybinds       Replace Omarchy's file-manager keybinds
+  -h, --help                    Show this help
+
+Integration flags imply --non-interactive. Folder association also installs the
+required desktop entry.
+EOF
+}
+
+parse_args() {
+  while (($# > 0)); do
+    case $1 in
+      --non-interactive) NON_INTERACTIVE=yes ;;
+      --with-smb) NON_INTERACTIVE=yes; WITH_SMB=yes ;;
+      --with-raw) NON_INTERACTIVE=yes; WITH_RAW=yes ;;
+      --with-desktop-entry) NON_INTERACTIVE=yes; WITH_DESKTOP_ENTRY=yes ;;
+      --with-folder-association)
+        NON_INTERACTIVE=yes
+        WITH_DESKTOP_ENTRY=yes
+        WITH_FOLDER_ASSOCIATION=yes
+        ;;
+      --with-omarchy-keybinds) NON_INTERACTIVE=yes; WITH_OMARCHY_KEYBINDS=yes ;;
+      -h | --help) usage; exit 0 ;;
+      *) die "Unknown option: $1 (run with --help for usage)." ;;
+    esac
+    shift
+  done
+}
+
+want_option() {
+  local selection=$1 question=$2 default=${3:-no}
+  case $selection in
+    yes) return 0 ;;
+    no) return 1 ;;
+    ask)
+      [[ $NON_INTERACTIVE == no ]] && prompt "$question" "$default"
+      ;;
+    *) die "Invalid installer option state: $selection" ;;
+  esac
+}
+
 version_at_least() {
   local actual=$1 required=$2 first
   first=$(printf '%s\n%s\n' "$required" "$actual" | sort -V | head -n 1)
@@ -118,6 +178,15 @@ latest_stable_version() {
   printf '%s\n' "${BASH_REMATCH[1]}"
 }
 
+run_pacman() {
+  if [[ $NON_INTERACTIVE == yes ]]; then
+    sudo -n pacman -S --needed --noconfirm -- "$@" \
+      || die "Non-interactive package installation failed; passwordless sudo or cached credentials may be required."
+  else
+    sudo pacman -S --needed -- "$@"
+  fi
+}
+
 install_arch_dependencies() {
   local missing=() package
   for package in "${REQUIRED_PACKAGES[@]}"; do
@@ -130,13 +199,29 @@ install_arch_dependencies() {
   fi
 
   printf 'Required packages: %s\n' "${missing[*]}"
-  prompt "Install these packages with sudo pacman?" \
-    || die "Required runtime packages were not installed."
-  sudo pacman -S --needed -- "${missing[@]}"
+  if [[ $NON_INTERACTIVE == no ]]; then
+    prompt "Install these packages with sudo pacman?" \
+      || die "Required runtime packages were not installed."
+  fi
+  run_pacman "${missing[@]}"
+}
+
+install_optional_arch_packages() {
+  local description=$1 package missing=()
+  shift
+  for package in "$@"; do
+    pacman -Q "$package" >/dev/null 2>&1 || missing+=("$package")
+  done
+  if ((${#missing[@]} == 0)); then
+    info "$description is already installed."
+  else
+    printf '%s packages: %s\n' "$description" "${missing[*]}"
+    run_pacman "${missing[@]}"
+  fi
 }
 
 install_desktop_entry() {
-  local extracted=$1 desktop_dir icon_dir escaped_bin staged
+  local extracted=$1 make_default=$2 desktop_dir icon_dir escaped_bin staged
   desktop_dir=${XDG_DATA_HOME:-$HOME/.local/share}/applications
   icon_dir=${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor
   staged=$TEMP_DIR/$APP_ID.desktop
@@ -153,7 +238,7 @@ install_desktop_entry() {
     && gtk-update-icon-cache -qtf "$icon_dir" 2>/dev/null || true
   info "Added Strata to the desktop application menu."
 
-  if prompt "Make Strata the default application for opening folders?" no; then
+  if [[ $make_default == yes ]]; then
     command -v xdg-mime >/dev/null 2>&1 \
       || die "xdg-mime is required to change the folder association."
     xdg-mime default "$APP_ID.desktop" inode/directory
@@ -233,13 +318,16 @@ EOF
 
 main() {
   local target glibc distro_id distro_like omarchy_major version archive extracted url
-  local local_bin_on_path=no
+  local local_bin_on_path=no make_default=no
 
+  parse_args "$@"
   [[ $(uname -s) == Linux ]] || die "The prebuilt Strata release supports Linux only."
   [[ $EUID -ne 0 ]] || die "Run this installer as your normal desktop user, not as root."
-  [[ -e /dev/tty && -r /dev/tty && -w /dev/tty ]] \
-    || die "This interactive installer needs a terminal."
-  PROMPT_DEVICE=/dev/tty
+  if [[ $NON_INTERACTIVE == no ]]; then
+    [[ -e /dev/tty && -r /dev/tty && -w /dev/tty ]] \
+      || die "This interactive installer needs a terminal."
+    PROMPT_DEVICE=/dev/tty
+  fi
   [[ :$PATH: == *":$HOME/.local/bin:"* ]] && local_bin_on_path=yes
   show_banner
 
@@ -272,12 +360,20 @@ main() {
   if [[ $distro_id == arch || $distro_like == *arch* || -n $omarchy_major ]]; then
     command -v pacman >/dev/null 2>&1 || die "This Arch-based system does not provide pacman."
     install_arch_dependencies
-    if prompt "Install optional SMB network-share support (gvfs-smb)?" no; then
-      sudo pacman -S --needed -- gvfs-smb
+    if want_option "$WITH_SMB" "Install optional SMB network-share support (gvfs-smb)?"; then
+      install_optional_arch_packages "SMB support" gvfs-smb
+    fi
+    if want_option "$WITH_RAW" \
+      "Install optional broader image and camera RAW support (imagemagick, libraw, dcraw)?"; then
+      install_optional_arch_packages "Image and camera RAW support" \
+        "${RAW_PREVIEW_PACKAGES[@]}"
     fi
   else
     printf '\nStrata needs GTK 4.12+, GtkSourceView 5, Poppler GLib, Fontconfig, Bubblewrap,\n'
     printf 'FFmpeg, ffmpegthumbnailer, and GStreamer runtime plugins.\n'
+    if [[ $NON_INTERACTIVE == yes ]]; then
+      die "Non-interactive dependency installation currently supports Arch-based systems only."
+    fi
     prompt "Have you installed the equivalent packages for this distribution?" \
       || die "Install the runtime dependencies, then run this installer again."
   fi
@@ -309,19 +405,29 @@ main() {
     || die "The verified archive is missing desktop integration files."
 
   BIN_PATH=$HOME/.local/bin/strata
-  if [[ -e $BIN_PATH ]] && ! prompt "Replace the existing $BIN_PATH?" no; then
-    die "Installation cancelled without replacing the existing file."
+  if [[ -e $BIN_PATH ]]; then
+    if [[ $NON_INTERACTIVE == yes ]]; then
+      die "$BIN_PATH already exists; remove it or run the interactive installer to replace it."
+    fi
+    prompt "Replace the existing $BIN_PATH?" no \
+      || die "Installation cancelled without replacing the existing file."
   fi
   install -Dm755 "$extracted/strata" "$BIN_PATH"
   export PATH="$HOME/.local/bin:$PATH"
   info "Installed $BIN_PATH"
 
-  if prompt "Add Strata to your desktop application menu?"; then
-    install_desktop_entry "$extracted"
+  if want_option "$WITH_DESKTOP_ENTRY" "Add Strata to your desktop application menu?" yes; then
+    if want_option "$WITH_FOLDER_ASSOCIATION" \
+      "Make Strata the default application for opening folders?"; then
+      make_default=yes
+    fi
+    install_desktop_entry "$extracted" "$make_default"
   fi
 
-  if [[ -n $omarchy_major ]] \
-    && prompt "Replace Omarchy's Nautilus file-manager keybinds with Strata?" no; then
+  if want_option "$WITH_OMARCHY_KEYBINDS" \
+    "Replace Omarchy's Nautilus file-manager keybinds with Strata?"; then
+    [[ -n $omarchy_major ]] \
+      || die "--with-omarchy-keybinds requires Omarchy 3 or 4."
     configure_omarchy_bindings "$omarchy_major"
   fi
 
