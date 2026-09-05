@@ -593,7 +593,7 @@ impl ModeViews {
         button.set_active(true);
         if let Some(query) = query {
             entry.set_text(query);
-            entry.set_position(-1);
+            entry.select_region(-1, -1);
         }
         entry.grab_focus();
         true

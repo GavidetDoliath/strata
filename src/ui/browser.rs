@@ -1097,7 +1097,7 @@ impl BrowserView {
         column.filter_button.set_active(true);
         if let Some(query) = query {
             column.filter_entry.set_text(query);
-            column.filter_entry.set_position(-1);
+            column.filter_entry.select_region(-1, -1);
         }
         column.filter_entry.grab_focus();
         true
