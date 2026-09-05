@@ -50,7 +50,14 @@ struct TypeToSearch {
 
 impl TypeToSearch {
     fn show(&self, query: char) -> bool {
-        self.preferences.type_to_search() && self.view.show_filter_with_query(&query.to_string())
+        if !self.preferences.type_to_search() {
+            return false;
+        }
+        let view = self.view.clone();
+        glib::idle_add_local_once(move || {
+            view.show_filter_with_query(&query.to_string());
+        });
+        true
     }
 }
 
