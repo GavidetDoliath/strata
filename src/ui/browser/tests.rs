@@ -1679,16 +1679,17 @@ fn seeded_filter_keeps_first_character_when_typing_continues() {
         .expect("entry should have an editable delegate")
         .downcast::<gtk::Text>()
         .expect("entry delegate should be GtkText");
+    let suffix = &"LICENSE"[1..];
     for seed in ["L", "é", "文"] {
         entry.grab_focus();
         super::focus_filter_entry(&entry, Some(seed));
         assert_eq!(entry.selection_bounds(), None);
         assert_eq!(entry.position(), seed.chars().count() as i32);
-        text.emit_by_name::<()>("insert-at-cursor", &[&"ICENSE"]);
-        assert_eq!(entry.text(), format!("{seed}ICENSE"));
+        text.emit_by_name::<()>("insert-at-cursor", &[&suffix]);
+        assert_eq!(entry.text(), format!("{seed}{suffix}"));
     }
     super::focus_filter_entry(&entry, None);
-    assert_eq!(entry.text(), "文ICENSE");
+    assert_eq!(entry.text(), format!("文{suffix}"));
     window.destroy();
 }
 
