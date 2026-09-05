@@ -1095,11 +1095,7 @@ impl BrowserView {
             return false;
         };
         column.filter_button.set_active(true);
-        if let Some(query) = query {
-            column.filter_entry.set_text(query);
-            column.filter_entry.select_region(-1, -1);
-        }
-        column.filter_entry.grab_focus();
+        focus_filter_entry(&column.filter_entry, query);
         true
     }
 
@@ -6029,6 +6025,17 @@ pub(crate) fn detach_collection_view(view: &impl IsA<gtk::Widget>) {
     } else if let Ok(grid) = view.clone().downcast::<gtk::GridView>() {
         grid.set_factory(None::<&gtk::ListItemFactory>);
         grid.set_model(None::<&gtk::SelectionModel>);
+    }
+}
+
+pub(crate) fn focus_filter_entry(entry: &gtk::Entry, query: Option<&str>) {
+    if let Some(query) = query {
+        entry.set_text(query);
+        // Regular grab_focus selects the seed again, so the next key would replace it.
+        entry.grab_focus_without_selecting();
+        entry.select_region(-1, -1);
+    } else {
+        entry.grab_focus();
     }
 }
 

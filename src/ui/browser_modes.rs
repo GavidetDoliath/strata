@@ -591,11 +591,7 @@ impl ModeViews {
             return false;
         };
         button.set_active(true);
-        if let Some(query) = query {
-            entry.set_text(query);
-            entry.select_region(-1, -1);
-        }
-        entry.grab_focus();
+        super::browser::focus_filter_entry(entry, query);
         true
     }
 
